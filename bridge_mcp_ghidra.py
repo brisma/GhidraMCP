@@ -365,6 +365,26 @@ def rename_function_by_address(function_address: str, new_name: str) -> str:
     return safe_post("rename_function_by_address", {"function_address": function_address, "new_name": new_name})
 
 @mcp.tool()
+def create_function(address: str, name: str = "") -> str:
+    """
+    Create a function at one or more addresses, disassembling first if needed.
+
+    Auto-analysis leaves code that nothing references statically — jump table
+    targets, hand-written assembly, raw memory dumps — as undefined bytes,
+    which decompile_function and disassemble_function cannot touch because
+    they require an existing function.
+
+    Args:
+        address: one address, or several separated by commas
+                 (e.g. "0x80028f4c" or "0x80028f4c,0x8002903c")
+        name: optional name, applied only when a single address is given
+
+    Returns:
+        A per-address report, followed by created/already defined/failed counts.
+    """
+    return safe_post("create_function", {"address": address, "name": name})
+
+@mcp.tool()
 def set_function_prototype(function_address: str, prototype: str) -> str:
     """
     Set a function's prototype.
