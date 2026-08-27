@@ -9,6 +9,7 @@
 import sys
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import argparse
 import logging
@@ -48,6 +49,20 @@ def _resolve_base_url(port: Optional[int] = None) -> str:
         return f"http://127.0.0.1:{port}/"
     if current_instance_port is not None:
         return f"http://127.0.0.1:{current_instance_port}/"
+    # More than one Ghidra is up and nothing has said which to use. Falling back
+    # to the default port here is what sent a session's whole work into another
+    # game's database without a word: the addresses of two programs built from
+    # one engine coincide, so nothing in any reply would have shown the mistake.
+    # Refusing costs one `use_instance` call and cannot be silent.
+    if len(active_instances) > 1:
+        listed = ", ".join(
+            f"{p} ({i.get('program') or 'no program'})"
+            for p, i in sorted(active_instances.items()))
+        raise RuntimeError(
+            f"{len(active_instances)} Ghidra instances are running and none is "
+            f"selected: {listed}. Call use_instance(port) to choose one -- this "
+            f"bridge will not guess, because a wrong guess writes into the wrong "
+            f"program and nothing in the answer would say so.")
     return ghidra_server_url
 
 
@@ -91,47 +106,40 @@ def _discover_instances() -> dict[int, dict]:
     Strategy 1: Query /instances on any known port (fast, returns all instances).
     Strategy 2: Port scan with /health (slow, used on initial startup).
     """
-    discovered = {}
+    discovered: dict[int, dict] = {}
 
-    # Fast path: query /instances on known ports
-    known_ports = list(active_instances.keys()) if active_instances else [_discovery_base_port]
-    for port in known_ports:
+    def _ask(port: int) -> None:
+        """Ask one port what it is, and record whatever it names."""
         try:
-            resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=2)
-            if resp.ok:
-                for inst in resp.json():
-                    p = inst["port"]
-                    discovered[p] = {
-                        "port": p,
-                        "program": inst.get("program") or None,
-                        "project": inst.get("project") or None,
-                    }
-                if discovered:
-                    return discovered
+            resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=1.5)
+            if not resp.ok:
+                return
+            for inst in resp.json():
+                p = inst["port"]
+                discovered[p] = {
+                    "port": p,
+                    "program": inst.get("program") or None,
+                    "project": inst.get("project") or None,
+                }
         except Exception:
-            continue
+            return
 
-    # Slow path: scan ports via /health
-    for port in range(_discovery_base_port, _discovery_base_port + _discovery_port_range):
-        try:
-            resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
-            if resp.ok and resp.text.strip() == "ok":
-                # Found an instance, try /instances for full details
-                try:
-                    detail_resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=2)
-                    if detail_resp.ok:
-                        for inst in detail_resp.json():
-                            p = inst["port"]
-                            discovered[p] = {
-                                "port": p,
-                                "program": inst.get("program") or None,
-                                "project": inst.get("project") or None,
-                            }
-                        return discovered
-                except Exception:
-                    discovered[port] = {"port": port, "program": None, "project": None}
-        except Exception:
-            continue
+    # EVERY port in the range, every time, and the results are MERGED.
+    #
+    # This used to ask one known port, take whatever that instance listed, and
+    # return immediately. An instance only ever lists ITSELF -- there is no
+    # registration between them -- so a second Ghidra on the next port was
+    # invisible for the whole life of the bridge: `list_instances` showed one,
+    # `use_instance` on the other was refused as "not found", and every call
+    # then fell through to the default port. Two sessions reverse engineering
+    # two games lost an afternoon to that, and four functions were created in
+    # the wrong database before anyone could see why.
+    ports = set(range(_discovery_base_port,
+                      _discovery_base_port + _discovery_port_range))
+    ports.update(active_instances.keys())
+
+    with ThreadPoolExecutor(max_workers=min(16, len(ports))) as pool:
+        list(pool.map(_ask, sorted(ports)))
 
     return discovered
 
@@ -201,6 +209,24 @@ def use_instance(port: int) -> str:
             # Try a fresh discovery before failing
             discovered = _discover_instances()
             active_instances = discovered
+
+        if port not in active_instances:
+            # Ask the port itself before refusing. Discovery is a convenience and
+            # not the authority: a port that answers is an instance, whether or
+            # not anything advertised it. Refusing here on discovery's word alone
+            # is what made a second Ghidra unreachable rather than merely unlisted.
+            try:
+                resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=2)
+                if resp.ok:
+                    for inst in resp.json():
+                        p = inst["port"]
+                        active_instances[p] = {
+                            "port": p,
+                            "program": inst.get("program") or None,
+                            "project": inst.get("project") or None,
+                        }
+            except Exception:
+                pass
 
         if port not in active_instances:
             return f"No Ghidra instance found on port {port}. Use list_instances() to see available instances."
@@ -383,6 +409,29 @@ def create_function(address: str, name: str = "") -> str:
         A per-address report, followed by created/already defined/failed counts.
     """
     return safe_post("create_function", {"address": address, "name": name})
+
+@mcp.tool()
+def delete_function(address: str) -> str:
+    """
+    Delete the function defined at one or more addresses.
+
+    The inverse of create_function. Removes the function definition — entry
+    point, body, name, parameters, locals — and leaves the instructions
+    disassembled, so the region can be re-defined afterwards.
+
+    Only an address that a function STARTS at is deleted. An address that
+    merely sits inside one is reported, naming the function it is inside,
+    and that function is left alone.
+
+    Args:
+        address: one address, or several separated by commas
+
+    Returns:
+        A per-address report, the deleted/not present/failed counts, and the
+        name of the program it acted on — check that name before trusting a
+        destructive result, because two databases can answer the same address.
+    """
+    return safe_post("delete_function", {"address": address})
 
 @mcp.tool()
 def set_function_prototype(function_address: str, prototype: str) -> str:
