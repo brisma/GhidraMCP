@@ -111,6 +111,29 @@ public final class CreateFunction extends Handler {
 							continue;
 						}
 
+						// Inside another function, which is not the same as undefined.
+						// Ghidra will happily define one here and SPLIT the body it
+						// lands in, leaving both halves decompiling into fragments
+						// full of unaff_ registers. That is not a hypothetical: four
+						// calls aimed at one program's addresses were answered by a
+						// second Ghidra holding a different game — same engine, same
+						// link order, so the addresses existed in both — and split
+						// three real functions before anyone noticed. Refusing here
+						// makes a misaimed call say so instead of quietly damaging a
+						// database, and the caller who really means it can delete the
+						// containing function first.
+						Function containing =
+								program.getFunctionManager().getFunctionContaining(addr);
+						if (containing != null) {
+							report.append(addrStr)
+									.append(": inside ").append(containing.getName())
+									.append(" @ ").append(containing.getEntryPoint())
+									.append(" — creating here would split it. Refused; "
+											+ "delete that function first if you mean to\n");
+							failed++;
+							continue;
+						}
+
 						// Undefined bytes cannot become a function until they are code.
 						Instruction instr = program.getListing().getInstructionAt(addr);
 						if (instr == null) {

@@ -427,9 +427,7 @@ def delete_function(address: str) -> str:
         address: one address, or several separated by commas
 
     Returns:
-        A per-address report, the deleted/not present/failed counts, and the
-        name of the program it acted on — check that name before trusting a
-        destructive result, because two databases can answer the same address.
+        A per-address report, followed by deleted/not present/failed counts.
     """
     return safe_post("delete_function", {"address": address})
 
