@@ -39,11 +39,22 @@ caller's behalf — see "Targeting" below.
 
 ### Testing
 ```bash
-uv run --with pytest --with requests --with mcp python -m pytest tests/ -q
+# Python bridge -- real HTTP servers stand in for Ghidra on a private port range
+uv run --no-project --with pytest --with requests --with "mcp<2" python -m pytest tests/ -q
+
+# Java plugin -- pure logic and the rules that keep handlers honest
+export GHIDRA_INSTALL_DIR=/path/to/ghidra && gradle test
 ```
-The Python bridge has tests (`tests/`), which run real HTTP servers standing in
-for Ghidra instances on a private port range. The Java plugin is still tested
-manually by installing into Ghidra and exercising endpoints.
+Use `--no-project`: a virtualenv left in the project directory is copied into
+the extension zip, which is how an 11 MB one once shipped inside a 1.5 MB
+extension. `mcp<2` matches the pin in `pyproject.toml`; mcp 2.x renamed FastMCP.
+
+The Java tests cover what can be tested without a running Ghidra: the identity
+guard's decision, transaction naming, and two rules over the sources -- that no
+handler opens a transaction without naming the session, and that the HTTP
+server keeps its single-threaded executor (`Handler` carries the session in a
+field, which is only safe while requests are dispatched one at a time). Handler
+behaviour against a real program is still tested by hand.
 
 ## Architecture
 

@@ -84,7 +84,7 @@ public final class RenameFunctionByAddress extends Handler {
 	 * @param success         an AtomicBoolean to indicate success or failure
 	 */
 	private void performFunctionRename(Program program, String functionAddrStr, String newName, AtomicBoolean success) {
-		int tx = program.startTransaction("Rename function by address");
+		int tx = program.startTransaction(tx("Rename function by address"));
 		try {
 			Address addr = program.getAddressFactory().getAddress(functionAddrStr);
 			Function func = program.getListing().getFunctionContaining(addr);

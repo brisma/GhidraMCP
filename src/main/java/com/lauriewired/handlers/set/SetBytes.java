@@ -73,7 +73,7 @@ public final class SetBytes extends Handler {
 
         try {
             SwingUtilities.invokeAndWait(() -> {
-                int txId = program.startTransaction("Write Bytes");
+                int txId = program.startTransaction(tx("Write Bytes"));
                 boolean success = false;
                 try {
                     Address address = program.getAddressFactory().getAddress(addressStr);

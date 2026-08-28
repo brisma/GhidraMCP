@@ -86,7 +86,7 @@ public final class AddClassMembers extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Add Class Members");
+				int txId = program.startTransaction(tx("Add Class Members"));
 				boolean success = false;
 				try {
 					SymbolTable symbolTable = program.getSymbolTable();

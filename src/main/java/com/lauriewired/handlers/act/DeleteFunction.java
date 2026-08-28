@@ -80,7 +80,7 @@ public final class DeleteFunction extends Handler {
 
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Delete Function");
+				int txId = program.startTransaction(tx("Delete Function"));
 				boolean success = false;
 				StringBuilder report = new StringBuilder();
 				int deleted = 0, absent = 0, failed = 0;

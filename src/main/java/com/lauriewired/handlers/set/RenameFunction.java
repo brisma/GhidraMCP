@@ -63,7 +63,7 @@ public final class RenameFunction extends Handler {
 		AtomicBoolean successFlag = new AtomicBoolean(false);
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int tx = program.startTransaction("Rename function via HTTP");
+				int tx = program.startTransaction(tx("Rename function via HTTP"));
 				try {
 					for (Function func : program.getFunctionManager().getFunctions(true)) {
 						if (func.getName().equals(oldName)) {

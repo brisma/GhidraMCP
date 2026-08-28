@@ -66,7 +66,7 @@ public class AddBookmark extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int transactionID = currentProgram.startTransaction("Add Bookmark");
+				int transactionID = currentProgram.startTransaction(tx("Add Bookmark"));
 				boolean success = false;
 				try {
 					Address address = currentProgram.getAddressFactory().getAddress(addressStr);

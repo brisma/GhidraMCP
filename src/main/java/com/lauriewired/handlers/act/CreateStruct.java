@@ -77,7 +77,7 @@ public final class CreateStruct extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Create Struct");
+				int txId = program.startTransaction(tx("Create Struct"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

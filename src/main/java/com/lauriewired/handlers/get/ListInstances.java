@@ -39,6 +39,8 @@ public final class ListInstances extends Handler {
 			String projectName = plugin.getProjectName();
 			info.put("program", programName != null ? programName : "");
 			info.put("project", projectName != null ? projectName : "");
+			String fileId = plugin.getFileID();
+			info.put("file_id", fileId != null ? fileId : "");
 			result.add(info);
 		}
 

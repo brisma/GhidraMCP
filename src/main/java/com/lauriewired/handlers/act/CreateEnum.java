@@ -75,7 +75,7 @@ public final class CreateEnum extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Create Enum");
+				int txId = program.startTransaction(tx("Create Enum"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

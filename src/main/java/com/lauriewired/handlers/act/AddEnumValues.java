@@ -77,7 +77,7 @@ public final class AddEnumValues extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Add Enum Values");
+				int txId = program.startTransaction(tx("Add Enum Values"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

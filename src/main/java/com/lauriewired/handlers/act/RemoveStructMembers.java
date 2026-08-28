@@ -74,7 +74,7 @@ public final class RemoveStructMembers extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Remove Struct Members");
+				int txId = program.startTransaction(tx("Remove Struct Members"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

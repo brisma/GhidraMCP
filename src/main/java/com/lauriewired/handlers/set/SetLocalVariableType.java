@@ -287,7 +287,7 @@ public final class SetLocalVariableType extends Handler {
 	 * @param success  AtomicBoolean to indicate if the operation was successful.
 	 */
 	private void updateVariableType(Program program, HighSymbol symbol, DataType dataType, AtomicBoolean success) {
-		int tx = program.startTransaction("Set variable type");
+		int tx = program.startTransaction(tx("Set variable type"));
 		try {
 			// Use HighFunctionDBUtil to update the variable with the new type
 			HighFunctionDBUtil.updateDBVariable(

@@ -65,7 +65,7 @@ public final class RenameData extends Handler {
 
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int tx = program.startTransaction("Rename data");
+				int tx = program.startTransaction(tx("Rename data"));
 				try {
 					Address addr = program.getAddressFactory().getAddress(addressStr);
 					SymbolTable symTable = program.getSymbolTable();

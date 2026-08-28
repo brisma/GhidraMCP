@@ -49,6 +49,6 @@ public final class SetDisassemblyComment extends Handler {
 	 * @return true if the comment was set successfully, false otherwise
 	 */
 	private boolean setDisassemblyComment(String addressStr, String comment) {
-		return setCommentAtAddress(tool, addressStr, comment, CommentType.EOL, "Set disassembly comment");
+		return setCommentAtAddress(tool, addressStr, comment, CommentType.EOL, tx("Set disassembly comment"));
 	}
 }

@@ -118,7 +118,7 @@ public final class SetGlobalDataType extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Set Global Data Type");
+				int txId = program.startTransaction(tx("Set Global Data Type"));
 				boolean success = false;
 				try {
 					// Parse the address

@@ -80,7 +80,7 @@ public final class CreateFunction extends Handler {
 
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Create Function");
+				int txId = program.startTransaction(tx("Create Function"));
 				boolean success = false;
 				StringBuilder report = new StringBuilder();
 				int created = 0, existing = 0, failed = 0;

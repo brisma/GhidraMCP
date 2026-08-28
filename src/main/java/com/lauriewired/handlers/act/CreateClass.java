@@ -83,7 +83,7 @@ public final class CreateClass extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Create Class");
+				int txId = program.startTransaction(tx("Create Class"));
 				boolean success = false;
 				try {
 					SymbolTable symbolTable = program.getSymbolTable();

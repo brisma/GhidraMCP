@@ -1,6 +1,7 @@
 package com.lauriewired;
 
 import com.lauriewired.handlers.Handler;
+import com.lauriewired.util.IdentityGuard;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.app.plugin.PluginCategoryNames;
@@ -9,11 +10,14 @@ import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.util.Msg;
 import ghidra.framework.options.Options;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.reflections.Reflections;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.Constructor;
+import java.nio.charset.StandardCharsets;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.util.*;
@@ -72,6 +76,18 @@ public class GhidraMCPPlugin extends Plugin {
 
 	/** Maximum number of ports to scan when looking for an available port */
 	private static final int MAX_PORT_SCAN = 100;
+
+	/** Header naming the database a request believes it is addressing. */
+	public static final String FILE_ID_HEADER = "X-Ghidra-File-ID";
+
+	/** Header naming the session the request is made on behalf of. */
+	public static final String SESSION_HEADER = "X-Ghidra-Session";
+
+	/**
+	 * Endpoints that reveal what this instance is, rather than act on it.
+	 * They must answer before a caller can know which database to name.
+	 */
+	private static final Set<String> IDENTITY_PATHS = Set.of("/instances", "/health");
 
 	/** The embedded HTTP server instance that handles all API requests */
 	private HttpServer server;
@@ -243,7 +259,15 @@ public class GhidraMCPPlugin extends Plugin {
 				routes.put(handler.getPath(), handler);
 				server.createContext(handler.getPath(), exchange -> {
 					try {
-						handler.handle(exchange);
+						if (refuseIfNotMine(exchange, handler.getPath())) {
+							return;
+						}
+						handler.beginRequest(exchange.getRequestHeaders().getFirst(SESSION_HEADER));
+						try {
+							handler.handle(exchange);
+						} finally {
+							handler.endRequest();
+						}
 					} catch (Exception e) {
 						throw new RuntimeException(e);
 					}
@@ -269,6 +293,45 @@ public class GhidraMCPPlugin extends Plugin {
 				server = null;
 			}
 		}, "GhidraMCP-HTTP-Server").start();
+	}
+
+	/**
+	 * Refuses a request that names a database other than this one.
+	 *
+	 * Which Ghidra answers on which port is decided by boot order, and two
+	 * programs built from one engine share their addresses -- so a call that
+	 * reaches the wrong instance is answered plausibly and a write lands
+	 * silently in the wrong game. The instance is the only party that knows,
+	 * at the moment it acts, which database it is, so it is the one that says
+	 * no. A request that names nothing is left alone: that is a person at a
+	 * shell checking by hand, which is the very thing you reach for when you
+	 * do not trust the layers above.
+	 *
+	 * @return true if the request was refused and must not be handled
+	 */
+	private boolean refuseIfNotMine(HttpExchange exchange, String path) throws IOException {
+		if (IDENTITY_PATHS.contains(path)) {
+			return false;
+		}
+		String declared = exchange.getRequestHeaders().getFirst(FILE_ID_HEADER);
+		String mine = getFileID();
+		if (!IdentityGuard.refuses(declared, mine)) {
+			return false;
+		}
+		String holding = getProgramName() == null
+				? "no program loaded"
+				: getProgramName() + " (" + getProjectName() + "), file id " + mine;
+		String message = "This Ghidra instance holds " + holding
+				+ "; the request asked for file id " + declared
+				+ ". Nothing was done.";
+		byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
+		exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=utf-8");
+		exchange.sendResponseHeaders(409, bytes.length);
+		try (OutputStream os = exchange.getResponseBody()) {
+			os.write(bytes);
+		}
+		Msg.warn(this, "Refused a request for file id " + declared + " on port " + activePort);
+		return true;
 	}
 
 	/**
@@ -355,6 +418,22 @@ public class GhidraMCPPlugin extends Plugin {
 		if (p == null) return null;
 		ghidra.framework.model.DomainFile df = p.getDomainFile();
 		return df != null ? df.getName() : p.getName();
+	}
+
+	/**
+	 * Returns the persistent unique id of the current program's database, or
+	 * null if no program is loaded.
+	 *
+	 * This, not the program's name, is what identifies a database: two projects
+	 * can hold the same executable under the same name, and a name is then no
+	 * identity at all.
+	 */
+	public String getFileID() {
+		ghidra.program.model.listing.Program p =
+			ghidra.program.util.GhidraProgramUtilities.getCurrentProgram(tool);
+		if (p == null) return null;
+		ghidra.framework.model.DomainFile df = p.getDomainFile();
+		return df != null ? df.getFileID() : null;
 	}
 
 	/** Returns the Ghidra project name, or null. */

@@ -79,7 +79,7 @@ public final class RemoveClassMembers extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Remove Class Members");
+				int txId = program.startTransaction(tx("Remove Class Members"));
 				boolean success = false;
 				try {
 					SymbolTable symbolTable = program.getSymbolTable();

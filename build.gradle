@@ -48,3 +48,15 @@ java {
 	sourceCompatibility = JavaVersion.VERSION_21
 	targetCompatibility = JavaVersion.VERSION_21
 }
+
+// The extension zip is built by copying the whole project directory, so
+// anything a developer leaves lying around ships inside it -- a stray Python
+// virtualenv put 11 MB of compiled wheels into a 1.5 MB extension once.
+buildExtension {
+	exclude '.venv/**'
+	exclude '**/__pycache__/**'
+	exclude '*.egg-info/**'
+	exclude 'uv.lock'
+	exclude 'tests/**'
+	exclude '.pytest_cache/**'
+}

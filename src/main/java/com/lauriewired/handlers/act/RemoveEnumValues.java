@@ -73,7 +73,7 @@ public final class RemoveEnumValues extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Remove Enum Values");
+				int txId = program.startTransaction(tx("Remove Enum Values"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

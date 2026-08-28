@@ -48,6 +48,6 @@ public final class SetDecompilerComment extends Handler {
 	 * @return true if the comment was set successfully, false otherwise
 	 */
 	private boolean setDecompilerComment(String addressStr, String comment) {
-		return setCommentAtAddress(tool, addressStr, comment, CommentType.PRE, "Set decompiler comment");
+		return setCommentAtAddress(tool, addressStr, comment, CommentType.PRE, tx("Set decompiler comment"));
 	}
 }

@@ -67,7 +67,7 @@ public final class ClearStruct extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Clear Struct");
+				int txId = program.startTransaction(tx("Clear Struct"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

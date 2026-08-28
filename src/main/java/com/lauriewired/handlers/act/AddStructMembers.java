@@ -79,7 +79,7 @@ public final class AddStructMembers extends Handler {
 		final AtomicReference<String> result = new AtomicReference<>();
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int txId = program.startTransaction("Add Struct Member");
+				int txId = program.startTransaction(tx("Add Struct Member"));
 				boolean success = false;
 				try {
 					DataTypeManager dtm = program.getDataTypeManager();

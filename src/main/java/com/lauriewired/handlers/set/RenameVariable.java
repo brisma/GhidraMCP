@@ -128,7 +128,7 @@ public final class RenameVariable extends Handler {
 
 		try {
 			SwingUtilities.invokeAndWait(() -> {
-				int tx = program.startTransaction("Rename variable");
+				int tx = program.startTransaction(tx("Rename variable"));
 				try {
 					if (commitRequired) {
 						HighFunctionDBUtil.commitParamsToDatabase(highFunction, false,

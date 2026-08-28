@@ -182,7 +182,7 @@ public final class SetFunctionPrototype extends Handler {
 	 * @param prototype The prototype string being set
 	 */
 	private void addPrototypeComment(Program program, Function func, String prototype) {
-		int txComment = program.startTransaction("Add prototype comment");
+		int txComment = program.startTransaction(tx("Add prototype comment"));
 		try {
 			program.getListing().setComment(
 					func.getEntryPoint(),
@@ -206,7 +206,7 @@ public final class SetFunctionPrototype extends Handler {
 	private void parseFunctionSignatureAndApply(Program program, Address addr, String prototype,
 			AtomicBoolean success, StringBuilder errorMessage) {
 		// Use ApplyFunctionSignatureCmd to parse and apply the signature
-		int txProto = program.startTransaction("Set function prototype");
+		int txProto = program.startTransaction(tx("Set function prototype"));
 		try {
 			// Get data type manager
 			DataTypeManager dtm = program.getDataTypeManager();
