@@ -65,3 +65,10 @@ dependency-reduced-pom.xml
 .gradle/
 build/
 dist/
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+uv.lock
+.venv/

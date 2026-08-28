@@ -6,6 +6,7 @@
 # ]
 # ///
 
+import os
 import sys
 import json
 import threading
@@ -14,11 +15,10 @@ import requests
 import argparse
 import logging
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from mcp.server.fastmcp import FastMCP
 
-DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
 DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_DISCOVERY_BASE_PORT = 8080
 DEFAULT_DISCOVERY_RANGE = 100
@@ -27,43 +27,142 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP("ghidra-mcp")
 
-# Initialize ghidra_server_url with default value
-ghidra_server_url = DEFAULT_GHIDRA_SERVER
 # Initialize ghidra_request_timeout with default value
 ghidra_request_timeout = DEFAULT_REQUEST_TIMEOUT
 
 # Multi-instance state
-active_instances: dict[int, dict] = {}      # port -> {"port", "program", "project"}
-current_instance_port: Optional[int] = None  # currently targeted instance
+active_instances: dict[int, dict] = {}  # port -> {"port", "program", "project", "file_id"}
+# The chosen target is a PROGRAM, not a port. A port is an allocation detail:
+# which game answers on 8080 is decided by boot order and changes between
+# restarts. The program is what the caller means, so that is what we hold, and
+# the port is re-derived from it whenever it is needed.
+current_target: Optional[dict] = None  # {"program", "project", "file_id", "port"}
 _instances_lock = threading.Lock()
 _discovery_base_port = DEFAULT_DISCOVERY_BASE_PORT
 _discovery_port_range = DEFAULT_DISCOVERY_RANGE
 
+def _ask_identity(port: int, timeout: float) -> Optional[dict]:
+    """Ask one port which program it is holding. None if it will not say."""
+    try:
+        resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=timeout)
+        if not resp.ok:
+            return None
+        for inst in resp.json():
+            if inst.get("port") == port:
+                return {"port": port,
+                        "program": inst.get("program") or None,
+                        "project": inst.get("project") or None,
+                        "file_id": inst.get("file_id") or None}
+    except Exception:
+        return None
+    return None
+
+
+def _same_program(a: dict, b: dict) -> bool:
+    """Do two identities name the same database?"""
+    return (a.get("program"), a.get("project")) == (b.get("program"), b.get("project"))
+
+
+def _describe(t: dict) -> str:
+    return f"{t.get('program') or 'no program'} ({t.get('project') or 'unknown project'})"
+
+
 def _resolve_base_url(port: Optional[int] = None) -> str:
     """
     Resolve the base URL for a Ghidra instance.
-    If port is given, construct URL from it.
-    Otherwise, use current_instance_port if set, else fall back to ghidra_server_url.
+    If port is given, construct URL from it. Otherwise use the chosen target.
     """
+    global current_target
+
     if port is not None:
         return f"http://127.0.0.1:{port}/"
-    if current_instance_port is not None:
-        return f"http://127.0.0.1:{current_instance_port}/"
-    # More than one Ghidra is up and nothing has said which to use. Falling back
-    # to the default port here is what sent a session's whole work into another
-    # game's database without a word: the addresses of two programs built from
-    # one engine coincide, so nothing in any reply would have shown the mistake.
-    # Refusing costs one `use_instance` call and cannot be silent.
-    if len(active_instances) > 1:
+    if current_target is None:
+        # Nothing has been chosen, so there is nothing to resolve. Picking one
+        # here -- the default port, or the only instance that happens to answer
+        # -- is picking by boot order, and boot order is not a choice. That is
+        # what sent a session's work into another game's database without a
+        # word: the addresses of two programs built from one engine coincide, so
+        # nothing in any reply would have shown the mistake.
         listed = ", ".join(
             f"{p} ({i.get('program') or 'no program'})"
-            for p, i in sorted(active_instances.items()))
+            for p, i in sorted(active_instances.items())) or "none discovered yet"
         raise RuntimeError(
-            f"{len(active_instances)} Ghidra instances are running and none is "
-            f"selected: {listed}. Call use_instance(port) to choose one -- this "
-            f"bridge will not guess, because a wrong guess writes into the wrong "
-            f"program and nothing in the answer would say so.")
-    return ghidra_server_url
+            f"No Ghidra instance has been chosen. Call use_instance(port) or "
+            f"use_program(name) first -- this bridge will not choose for you, "
+            f"because a wrong choice writes into the wrong program and nothing "
+            f"in the answer would say so. Instances: {listed}.")
+
+    # Confirm, at the port we last saw it on, that the chosen program is still
+    # the one there. Measured at 0.25-0.5 ms on loopback; when the instance is
+    # busy this queues behind its work, which is exactly as long as the call
+    # itself would have queued.
+    here = _ask_identity(current_target["port"], ghidra_request_timeout)
+    if here is not None and _same_program(here, current_target):
+        return f"http://127.0.0.1:{current_target['port']}/"
+
+    # The port no longer holds what was chosen: it went quiet, or a restart
+    # dealt the ports out in a different order. A port is an allocation detail,
+    # so look for the program itself rather than giving up or, worse, settling
+    # for whoever answers.
+    found = [i for i in _discover_instances(ghidra_request_timeout).values()
+             if _same_program(i, current_target)]
+    if len(found) == 1:
+        with _instances_lock:
+            current_target = dict(found[0])
+        logger.info("%s moved to port %s", _describe(current_target),
+                    current_target["port"])
+        return f"http://127.0.0.1:{current_target['port']}/"
+
+    was = (f"port {current_target['port']} did not answer" if here is None
+           else f"port {current_target['port']} is now holding {_describe(here)}")
+    lo, hi = _discovery_base_port, _discovery_base_port + _discovery_port_range - 1
+    if not found:
+        raise RuntimeError(
+            f"{_describe(current_target)}: {was}, and the program is not open on "
+            f"any port in {lo}-{hi}. Nothing was sent.")
+    ports = ", ".join(str(i["port"]) for i in sorted(found, key=lambda x: x["port"]))
+    raise RuntimeError(
+        f"{_describe(current_target)}: {was}, and the same program now answers on "
+        f"{len(found)} ports ({ports}). Neither is the one that was chosen. "
+        f"Nothing was sent -- say which with use_instance(port).")
+
+
+def _session_tag() -> Optional[str]:
+    """A short, stable name for the calling session.
+
+    Ghidra records a name per transaction, in the undo stack and the project
+    history, and today it is generic ("Create Function") -- it throws away the
+    one fact that was missing for two hours when four functions appeared in a
+    database and nobody could say who had made them. Claude Code already puts a
+    distinct session id in every bridge's environment, so this costs nothing.
+    """
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return sid.split("-")[0] if sid else None
+
+
+def _identity_headers(port: Optional[int]) -> dict:
+    """What this request believes it is talking to, and on whose behalf.
+
+    The file id goes out only when the target was resolved from the chosen
+    program: an explicit port= is a deliberate bypass and must not be stamped
+    with somebody else's identity. It is absent entirely against a plugin that
+    does not report one, so the two halves can be updated in either order.
+    """
+    headers = {}
+    if port is None and current_target and current_target.get("file_id"):
+        headers["X-Ghidra-File-ID"] = current_target["file_id"]
+    tag = _session_tag()
+    if tag:
+        headers["X-Ghidra-Session"] = tag
+    return headers
+
+
+def _raise_if_refused(response) -> None:
+    """A 409 is the instance saying the request named a database that is not
+    its own. It is not a result to be read among the others: it stops here."""
+    if response.status_code == 409:
+        raise RuntimeError(f"The Ghidra instance refused the call: "
+                           f"{response.text.strip()}")
 
 
 def safe_get(endpoint: str, params: dict = None, port: int = None) -> list:
@@ -76,42 +175,49 @@ def safe_get(endpoint: str, params: dict = None, port: int = None) -> list:
     url = urljoin(_resolve_base_url(port), endpoint)
 
     try:
-        response = requests.get(url, params=params, timeout=ghidra_request_timeout)
+        response = requests.get(url, params=params, timeout=ghidra_request_timeout,
+                                headers=_identity_headers(port))
         response.encoding = 'utf-8'
+        _raise_if_refused(response)
         if response.ok:
             return response.text.splitlines()
         else:
             return [f"Error {response.status_code}: {response.text.strip()}"]
-    except Exception as e:
+    except requests.RequestException as e:
         return [f"Request failed: {str(e)}"]
 
 def safe_post(endpoint: str, data: dict | str, port: int = None) -> str:
+    # Resolution happens outside the try: a refusal to send is not a failure to
+    # send, and returning it as "Request failed: ..." dresses it as a flaky
+    # connection -- something a caller retries instead of stopping at.
+    url = urljoin(_resolve_base_url(port), endpoint)
     try:
-        url = urljoin(_resolve_base_url(port), endpoint)
         if isinstance(data, dict):
-            response = requests.post(url, data=data, timeout=ghidra_request_timeout)
+            response = requests.post(url, data=data, timeout=ghidra_request_timeout,
+                                     headers=_identity_headers(port))
         else:
-            response = requests.post(url, data=data.encode("utf-8"), timeout=ghidra_request_timeout)
+            response = requests.post(url, data=data.encode("utf-8"),
+                                     timeout=ghidra_request_timeout,
+                                     headers=_identity_headers(port))
         response.encoding = 'utf-8'
+        _raise_if_refused(response)
         if response.ok:
             return response.text.strip()
         else:
             return f"Error {response.status_code}: {response.text.strip()}"
-    except Exception as e:
+    except requests.RequestException as e:
         return f"Request failed: {str(e)}"
 
-def _discover_instances() -> dict[int, dict]:
+def _discover_instances(timeout: float = 1.5) -> dict[int, dict]:
     """
-    Discover active GhidraMCP instances.
-    Strategy 1: Query /instances on any known port (fast, returns all instances).
-    Strategy 2: Port scan with /health (slow, used on initial startup).
+    Ask every port in the range what it is holding, and merge the answers.
     """
     discovered: dict[int, dict] = {}
 
     def _ask(port: int) -> None:
         """Ask one port what it is, and record whatever it names."""
         try:
-            resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=1.5)
+            resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=timeout)
             if not resp.ok:
                 return
             for inst in resp.json():
@@ -144,25 +250,27 @@ def _discover_instances() -> dict[int, dict]:
     return discovered
 
 
-def _periodic_discovery():
-    """Background thread that rediscovers Ghidra instances every 30 seconds."""
-    global active_instances, current_instance_port
-    while True:
-        try:
-            discovered = _discover_instances()
-            with _instances_lock:
-                active_instances = discovered
-                # Reset current port if it's no longer available
-                if current_instance_port is not None and current_instance_port not in active_instances:
-                    logger.warning(f"Instance on port {current_instance_port} is no longer available")
-                    current_instance_port = None
-                # Auto-select if exactly one instance and no current selection
-                if current_instance_port is None and len(active_instances) == 1:
-                    current_instance_port = next(iter(active_instances))
-        except Exception as e:
-            logger.debug(f"Discovery error: {e}")
+def _pin_to(url: str) -> str:
+    """Pin this bridge to the instance at `url`, by the program found there.
 
-        threading.Event().wait(30)
+    This is what --ghidra-server means now. It used to be a default to fall
+    back on when nothing had been chosen, which is how a call with no target
+    ended up in whichever game happened to be on port 8080.
+    """
+    global current_target
+    try:
+        port = int(urlsplit(url).port)
+    except (TypeError, ValueError):
+        return f"--ghidra-server {url!r} names no port; nothing pinned."
+
+    here = _ask_identity(port, ghidra_request_timeout)
+    if here is None or here.get("program") is None:
+        return (f"No Ghidra instance with a program loaded answered on port "
+                f"{port}; nothing pinned. Choose one with use_instance(port).")
+    with _instances_lock:
+        active_instances[port] = here
+        current_target = here
+    return f"Pinned to {_describe(here)} on port {port}."
 
 
 @mcp.tool()
@@ -185,7 +293,8 @@ def list_instances() -> list:
 
     lines = []
     for port, info in sorted(active_instances.items()):
-        marker = " [ACTIVE]" if port == current_instance_port else ""
+        chosen = current_target is not None and _same_program(info, current_target)
+        marker = " [ACTIVE]" if chosen else ""
         program = info.get("program") or "No program loaded"
         project = info.get("project") or "Unknown project"
         lines.append(f"Port {port}: {program} ({project}){marker}")
@@ -195,46 +304,66 @@ def list_instances() -> list:
 @mcp.tool()
 def use_instance(port: int) -> str:
     """
-    Switch the active Ghidra instance to the one running on the specified port.
-    All subsequent tool calls will target this instance until changed.
-    Use list_instances() first to see available instances.
+    Choose the Ghidra instance to work in, by the port it answers on.
+
+    What is remembered is the PROGRAM found there, not the port: if the
+    instance later moves to another port the bridge follows it, and if that
+    port comes to hold a different program every call is refused rather than
+    answered by the wrong database.
 
     Args:
         port: The port number of the Ghidra instance to target.
     """
-    global current_instance_port, active_instances
+    global current_target, active_instances
+
+    # Ask the port itself. Discovery is a convenience, not the authority: a
+    # port that answers is an instance, whether or not anything advertised it.
+    here = _ask_identity(port, ghidra_request_timeout)
+    if here is None:
+        return (f"No Ghidra instance answered on port {port}. "
+                f"Use list_instances() to see what is running.")
+    if here.get("program") is None:
+        return (f"The Ghidra instance on port {port} has no program loaded, "
+                f"so there is nothing to target.")
 
     with _instances_lock:
-        if port not in active_instances:
-            # Try a fresh discovery before failing
-            discovered = _discover_instances()
-            active_instances = discovered
+        active_instances[port] = here
+        current_target = here
+    return f"Now targeting {_describe(here)} on port {port}."
 
-        if port not in active_instances:
-            # Ask the port itself before refusing. Discovery is a convenience and
-            # not the authority: a port that answers is an instance, whether or
-            # not anything advertised it. Refusing here on discovery's word alone
-            # is what made a second Ghidra unreachable rather than merely unlisted.
-            try:
-                resp = requests.get(f"http://127.0.0.1:{port}/instances", timeout=2)
-                if resp.ok:
-                    for inst in resp.json():
-                        p = inst["port"]
-                        active_instances[p] = {
-                            "port": p,
-                            "program": inst.get("program") or None,
-                            "project": inst.get("project") or None,
-                        }
-            except Exception:
-                pass
 
-        if port not in active_instances:
-            return f"No Ghidra instance found on port {port}. Use list_instances() to see available instances."
+@mcp.tool()
+def use_program(name: str) -> str:
+    """
+    Choose the Ghidra instance by the program it holds, rather than by port.
 
-    current_instance_port = port
-    info = active_instances.get(port, {})
-    program = info.get("program") or "No program loaded"
-    return f"Switched to Ghidra instance on port {port} ({program})"
+    The port a game answers on is decided by boot order and changes between
+    restarts; the program does not. Give the program name as list_instances()
+    reports it.
+
+    Args:
+        name: The program name, or a unique part of it.
+    """
+    global current_target, active_instances
+
+    discovered = _discover_instances(ghidra_request_timeout)
+    with _instances_lock:
+        active_instances = dict(discovered)
+
+    matches = [i for i in discovered.values() if i.get("program") == name]
+    if len(matches) != 1:
+        listed = ", ".join(
+            f"{p} ({i.get('program') or 'no program'})"
+            for p, i in sorted(discovered.items())) or "none"
+        if not matches:
+            return f"No Ghidra instance is holding '{name}'. Running: {listed}."
+        ports = ", ".join(str(i["port"]) for i in sorted(matches, key=lambda x: x["port"]))
+        return (f"'{name}' is open on {len(matches)} ports ({ports}); say which "
+                f"with use_instance(port).")
+
+    with _instances_lock:
+        current_target = dict(matches[0])
+    return f"Now targeting {_describe(current_target)} on port {current_target['port']}."
 
 
 @mcp.tool()
@@ -888,8 +1017,11 @@ def get_callee(address: str) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
-    parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,
-                        help=f"Ghidra server URL, default: {DEFAULT_GHIDRA_SERVER}")
+    parser.add_argument("--ghidra-server", type=str, default=None,
+                        help="Pin this bridge to the Ghidra instance at this URL, "
+                             "by the program it holds. There is no default: with "
+                             "no pin, a session says which program it means with "
+                             "use_program() or use_instance().")
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1",
                         help="Host to run MCP server on (only used for sse/streamable-http), default: 127.0.0.1")
     parser.add_argument("--mcp-port", type=int,
@@ -904,31 +1036,20 @@ def main():
                         help=f"Number of ports to scan from base port (default: {DEFAULT_DISCOVERY_RANGE})")
     args = parser.parse_args()
 
-    global ghidra_server_url, ghidra_request_timeout
+    global ghidra_request_timeout
     global _discovery_base_port, _discovery_port_range
-    global active_instances, current_instance_port
 
-    if args.ghidra_server:
-        ghidra_server_url = args.ghidra_server
     if args.ghidra_timeout:
         ghidra_request_timeout = args.ghidra_timeout
 
     _discovery_base_port = args.discovery_base_port
     _discovery_port_range = args.discovery_range
 
-    # Run initial discovery
-    discovered = _discover_instances()
-    with _instances_lock:
-        active_instances.update(discovered)
-        if len(active_instances) == 1:
-            current_instance_port = next(iter(active_instances))
-            logger.info(f"Auto-selected single instance on port {current_instance_port}")
-        elif active_instances:
-            logger.info(f"Found {len(active_instances)} instances: {list(active_instances.keys())}")
-
-    # Start background discovery thread
-    discovery_thread = threading.Thread(target=_periodic_discovery, daemon=True)
-    discovery_thread.start()
+    # No auto-selection and no background thread. Both were ways of choosing on
+    # the caller's behalf, and the only thing either had to choose with was boot
+    # order. A session says which program it means, once.
+    if args.ghidra_server:
+        logger.info("%s", _pin_to(args.ghidra_server))
 
     transport = args.transport.replace("_", "-")
     if transport in ("sse", "streamable-http"):
@@ -950,7 +1071,6 @@ def main():
             else:
                 mcp.settings.port = 8081
 
-            logger.info(f"Connecting to Ghidra server at {ghidra_server_url}")
             if transport == "sse":
                 logger.warning("SSE transport is deprecated in MCP; prefer streamable-http.")
                 logger.info(f"Starting MCP server on http://{mcp.settings.host}:{mcp.settings.port}{mcp.settings.sse_path}")

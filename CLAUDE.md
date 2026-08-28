@@ -28,13 +28,47 @@ The build uses Ghidra's `buildExtension.gradle` script. Output goes to `dist/`.
 pip install -r requirements.txt    # mcp>=1.2.0, requests>=2
 python bridge_mcp_ghidra.py        # Run with stdio transport (default)
 python bridge_mcp_ghidra.py --transport streamable-http --mcp-host 127.0.0.1 --mcp-port 8081
-python bridge_mcp_ghidra.py --ghidra-server http://127.0.0.1:8080/
+python bridge_mcp_ghidra.py --ghidra-server http://127.0.0.1:8080/   # pin to one instance
 ```
 
+`--ghidra-server` is a **pin**, not a default: the bridge asks that port which
+program it holds and targets that program. Without it there is no target, and
+every call is refused until a session says which program it means with
+`use_program(name)` or `use_instance(port)`. The bridge never chooses on the
+caller's behalf — see "Targeting" below.
+
 ### Testing
-No automated test suite exists. The plugin is tested manually by installing into Ghidra and exercising endpoints.
+```bash
+uv run --with pytest --with requests --with mcp python -m pytest tests/ -q
+```
+The Python bridge has tests (`tests/`), which run real HTTP servers standing in
+for Ghidra instances on a private port range. The Java plugin is still tested
+manually by installing into Ghidra and exercising endpoints.
 
 ## Architecture
+
+### Targeting: which Ghidra instance a call reaches
+Several Ghidra instances can be up at once, each with its own program, and
+several bridge processes talk to them — one per Claude Code session. Getting
+this wrong is not a visible failure: two programs built from the same engine
+share addresses, so a call answered by the wrong database returns a plausible
+answer, and a write lands silently in the wrong game.
+
+The rules the bridge follows:
+
+* **The target is a program, never a port.** Which game answers on 8080 is
+  decided by boot order and changes between restarts.
+* **Nothing is chosen implicitly.** No default port, no auto-selection when only
+  one instance is up, no background thread that re-points a session. Boot order
+  is not a choice.
+* **The program is confirmed before every call** (~0.3 ms on loopback). If the
+  port now holds something else, or has gone quiet, the bridge looks for the
+  program elsewhere; finding it on exactly one port it follows it there, and on
+  none or several it raises and sends nothing.
+* **Every request names the database** it believes it is addressing
+  (`X-Ghidra-File-ID`) **and the session asking** (`X-Ghidra-Session`), so the
+  instance can refuse what is not its own and the undo stack records who acted.
+* **A refusal raises**, never returns as a line of text among the results.
 
 ### Handler System (Java)
 All HTTP endpoints are implemented as subclasses of the abstract `Handler` class (`handlers/Handler.java`). Handlers are **auto-discovered at startup** via reflection (`org.reflections`) — any class extending `Handler` in `com.lauriewired.handlers` is automatically registered.
