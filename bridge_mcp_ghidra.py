@@ -226,6 +226,11 @@ def _discover_instances(timeout: float = 1.5) -> dict[int, dict]:
                     "port": p,
                     "program": inst.get("program") or None,
                     "project": inst.get("project") or None,
+                    # Discovery used to drop this, so a target chosen with
+                    # use_program carried no identity and the instance had
+                    # nothing to refuse on -- the guard was inert on the path a
+                    # session is most likely to take.
+                    "file_id": inst.get("file_id") or None,
                 }
         except Exception:
             return

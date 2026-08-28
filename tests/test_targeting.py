@@ -198,3 +198,20 @@ def test_a_pin_that_finds_nothing_pins_nothing(ghidra):
 
     assert bridge.current_target is None
     assert "nothing pinned" in message
+
+
+def test_choosing_by_program_also_carries_the_database_identity(ghidra):
+    """use_instance and use_program must produce the same target.
+
+    They did not: use_program built its target from discovery, which dropped
+    the file id, so a session that chose by program sent no identity and the
+    instance had nothing to refuse on. The guard was inert on the path a
+    session is most likely to use.
+    """
+    inst = ghidra(0, "SLUS_010.71", file_id="4d2c1a90")
+
+    bridge.use_program("SLUS_010.71")
+    bridge.safe_get("probe")
+
+    assert bridge.current_target["file_id"] == "4d2c1a90"
+    assert _headers(inst.requests[0])["x-ghidra-file-id"] == "4d2c1a90"
