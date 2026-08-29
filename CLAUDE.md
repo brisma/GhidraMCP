@@ -14,7 +14,10 @@ Data flow: `MCP Client → Python Bridge → HTTP → Ghidra Plugin → Ghidra A
 ## Build Commands
 
 ### Java Plugin (Gradle)
-Requires `GHIDRA_INSTALL_DIR` environment variable pointing to a Ghidra installation (11.3.2+), Java 21.
+Requires `GHIDRA_INSTALL_DIR` environment variable pointing to a Ghidra
+installation (**11.4+**, developed against 12.0.4), Java 21. Not 11.3.2: the
+handlers use the `CommentType` enum, which replaced the old `CodeUnit` integer
+constants in 11.4 and does not exist before it.
 
 ```bash
 export GHIDRA_INSTALL_DIR=/path/to/ghidra
@@ -50,11 +53,17 @@ the extension zip, which is how an 11 MB one once shipped inside a 1.5 MB
 extension. `mcp<2` matches the pin in `pyproject.toml`; mcp 2.x renamed FastMCP.
 
 The Java tests cover what can be tested without a running Ghidra: the identity
-guard's decision, transaction naming, and two rules over the sources -- that no
-handler opens a transaction without naming the session, and that the HTTP
-server keeps its single-threaded executor (`Handler` carries the session in a
-field, which is only safe while requests are dispatched one at a time). Handler
-behaviour against a real program is still tested by hand.
+guard's decision, transaction naming, URL parameter parsing, and three rules
+over the sources -- that no handler opens a transaction without naming the
+session, that the HTTP server keeps its single-threaded executor (`Handler`
+carries the session in a field, which is only safe while requests are
+dispatched one at a time), and that a decompiler is constructed only in
+`Decompilers` and disposed by every file that opens one. Handler behaviour
+against a real program is still tested by hand.
+
+The Python tests additionally sweep **every** registered MCP tool and assert it
+refuses to act before a target is chosen, so a tool added later cannot quietly
+bypass the targeting rules below.
 
 ## Architecture
 
@@ -81,6 +90,37 @@ The rules the bridge follows:
   instance can refuse what is not its own and the undo stack records who acted.
 * **A refusal raises**, never returns as a line of text among the results.
 
+### Turning bytes into code
+Auto-analysis leaves anything it cannot reach statically as undefined bytes,
+and for a long time nothing here could touch them: `disassemble_function` is a
+reader that requires an existing function, and both decompilers require one
+too. The four primitives that close that loop mirror the CodeBrowser keys:
+
+| tool | key | what it does |
+|---|---|---|
+| `read_listing` | — | read any range: instructions, data, or `??` raw bytes |
+| `disassemble` | `D` | undefined bytes → instructions, following flow |
+| `create_function` | `F` | define a function, disassembling first if needed |
+| `clear_code` | `C` | instructions → undefined bytes again |
+
+Two rules hold across them:
+
+* **The restricted set is null unless the caller asked for a limit.** The
+  second argument to `DisassembleCommand` is the set of addresses disassembly
+  may *touch*, not where to start. A one-byte set there stops the disassembler
+  after a single instruction, and `CreateFunctionCmd` then computes a body by
+  following flow over the instructions that exist -- so every function created
+  from undefined bytes was one instruction long, and was reported as created.
+  `create_function` now reports the body size for exactly this reason.
+* **Processor mode is explicit, never guessed.** `mode=thumb|arm|mips|mips16`
+  routes to `ArmDisassembleCommand` / `MipsDisassembleCommand`, which set the
+  `TMode` / `ISA_MODE` context register. Asking for a mode the language has no
+  register for is refused by name rather than failing blankly; `program_info`
+  reports `thumb_capable` and `mips16_capable`.
+
+`clear_code` refuses a range covered by defined functions unless `force=true`,
+on the same principle as `create_function` refusing to split one.
+
 ### Handler System (Java)
 All HTTP endpoints are implemented as subclasses of the abstract `Handler` class (`handlers/Handler.java`). Handlers are **auto-discovered at startup** via reflection (`org.reflections`) — any class extending `Handler` in `com.lauriewired.handlers` is automatically registered.
 
@@ -97,8 +137,20 @@ Handler subpackages organize by operation type:
 - `handlers/search/` — Search operations
 
 ### Key Utilities (Java)
-- `util/GhidraUtils.java` — Program access, data type resolution, comment setting
-- `util/ParseUtils.java` — HTTP response helpers (`sendResponse`, `parseQueryParams`, `parsePostBody`)
+- `util/GhidraUtils.java` — Program access, data type resolution, comment setting.
+  `resolveDataType` returns **null** for a name no manager knows; callers must
+  report that rather than substitute anything. It used to fall back to `int`,
+  so a mistyped struct name silently became a four-byte integer.
+- `util/ParseUtils.java` — HTTP request/response helpers. Parameters are split
+  on the **raw** text and decoded once (`getRawQuery`, not `getQuery`):
+  `URI.getQuery()` resolves percent-escapes before you split, so an escaped
+  `&` inside a value became a real separator and a caller could inject a
+  parameter it never sent.
+- `util/Decompilers.java` — the only place a `DecompInterface` is constructed.
+  `openProgram` starts a native decompiler process; nothing here ever disposed
+  one, so a session leaked a process per decompilation and per variable rename.
+  A rule test fails the build if `new DecompInterface()` appears elsewhere.
+- `util/Disassemblers.java` — builds the disassembly command for a processor mode.
 - `util/StructUtils.java` / `util/EnumUtils.java` — Structure and enum manipulation
 
 ### Thread Safety

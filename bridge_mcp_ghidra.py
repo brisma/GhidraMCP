@@ -499,9 +499,99 @@ def decompile_function_by_address(address: str) -> str:
 @mcp.tool()
 def disassemble_function(address: str) -> list:
     """
-    Get assembly code (address: instruction; comment) for a function.
+    Read the assembly of an EXISTING function (address: instruction; comment).
+
+    This only reads. To turn undefined bytes into instructions, use
+    disassemble(); to see bytes that are not in a function at all, use
+    read_listing().
     """
     return safe_get("disassemble_function", {"address": address})
+
+@mcp.tool()
+def disassemble(address: str, mode: str = "", length: int = 0) -> str:
+    """
+    Turn undefined bytes into instructions -- Ghidra's D key.
+
+    Flow is followed as far as it goes, so one address usually brings in a
+    whole basic block chain. Nothing is defined as a function; use
+    create_function for that, or read_listing first to check what you got.
+
+    Args:
+        address: one address, or several separated by commas
+        mode: instruction set to decode as -- "" or "auto" (use the program's
+              existing context), "arm", "thumb", "mips", "mips16".
+              Ask get_program_info() which of these the language supports.
+        length: bytes to stay within, or 0 to follow flow unbounded
+
+    Returns:
+        A per-address report, then disassembled/already code/failed counts.
+    """
+    params = {"address": address}
+    if mode:
+        params["mode"] = mode
+    if length:
+        params["length"] = str(length)
+    return safe_post("disassemble", params)
+
+@mcp.tool()
+def clear_code(address: str, length: int = 0, end: str = "",
+               clear_context: bool = False, force: bool = False) -> str:
+    """
+    Clear code back to undefined bytes -- Ghidra's C key.
+
+    The inverse of disassemble(), and what makes it safe to try: a disassembly
+    started at the wrong offset or in the wrong mode can be undone.
+
+    A range covered by defined functions is refused, naming them, because
+    clearing it would leave those functions defined over bytes that are no
+    longer code. Pass force=True when that is what you mean.
+
+    Args:
+        address: where to start
+        length: bytes to clear. With neither length nor end, clears exactly the
+                one code unit at the address.
+        end: last address to clear, as an alternative to length
+        clear_context: also clear the processor context (TMode, ISA_MODE).
+                       Needed when re-doing a THUMB/ARM mistake.
+        force: clear even where functions are defined
+
+    Returns:
+        What was cleared, or the refusal and the functions in the way.
+    """
+    params = {"address": address}
+    if length:
+        params["length"] = str(length)
+    if end:
+        params["end"] = end
+    if clear_context:
+        params["clear_context"] = "true"
+    if force:
+        params["force"] = "true"
+    return safe_post("clear_code", params)
+
+@mcp.tool()
+def read_listing(address: str, count: int = 0, length: int = 0) -> list:
+    """
+    Read the listing over any range -- instructions, data, or raw bytes.
+
+    The only reader that does not require a function to exist first. Undefined
+    bytes come back as `??` rows, so you can look at a region before deciding
+    whether to disassemble it or type it as data.
+
+    Args:
+        address: where to start
+        count: code units to return (default 64, max 2000)
+        length: bytes to cover, as an alternative to count
+
+    Returns:
+        One line per code unit: address, bytes, what it is, and any comment.
+    """
+    params = {"address": address}
+    if count:
+        params["count"] = str(count)
+    if length:
+        params["length"] = str(length)
+    return safe_get("read_listing", params)
 
 @mcp.tool()
 def set_decompiler_comment(address: str, comment: str) -> str:
@@ -525,33 +615,47 @@ def rename_function_by_address(function_address: str, new_name: str) -> str:
     return safe_post("rename_function_by_address", {"function_address": function_address, "new_name": new_name})
 
 @mcp.tool()
-def create_function(address: str, name: str = "") -> str:
+def create_function(address: str, name: str = "", mode: str = "") -> str:
     """
     Create a function at one or more addresses, disassembling first if needed.
 
-    Auto-analysis leaves code that nothing references statically — jump table
-    targets, hand-written assembly, raw memory dumps — as undefined bytes,
+    Auto-analysis leaves code that nothing references statically -- jump table
+    targets, hand-written assembly, raw memory dumps -- as undefined bytes,
     which decompile_function and disassemble_function cannot touch because
     they require an existing function.
+
+    The report gives the size of each function created. A body of one
+    instruction means the flow went nowhere: usually the wrong address, or
+    bytes that need a different mode.
 
     Args:
         address: one address, or several separated by commas
                  (e.g. "0x80028f4c" or "0x80028f4c,0x8002903c")
         name: optional name, applied only when a single address is given
+        mode: instruction set for any disassembly this needs -- "" or "auto",
+              "arm", "thumb", "mips", "mips16"
 
     Returns:
         A per-address report, followed by created/already defined/failed counts.
     """
-    return safe_post("create_function", {"address": address, "name": name})
+    params = {"address": address, "name": name}
+    if mode:
+        params["mode"] = mode
+    return safe_post("create_function", params)
 
 @mcp.tool()
 def delete_function(address: str) -> str:
     """
     Delete the function defined at one or more addresses.
 
-    The inverse of create_function. Removes the function definition — entry
-    point, body, name, parameters, locals — and leaves the instructions
-    disassembled, so the region can be re-defined afterwards.
+    Removes the function definition -- entry point, body, parameters, locals
+    -- and leaves the instructions disassembled, so the region can be
+    re-defined afterwards.
+
+    NOT a complete inverse of create_function. Removing a function removes the
+    function, not the symbol: if the function was renamed, that name stays
+    behind as a label on the address. The report names any label left, and
+    delete_label removes it. Ghidra's own Delete Function does the same thing.
 
     Only an address that a function STARTS at is deleted. An address that
     merely sits inside one is reported, naming the function it is inside,
@@ -564,6 +668,219 @@ def delete_function(address: str) -> str:
         A per-address report, followed by deleted/not present/failed counts.
     """
     return safe_post("delete_function", {"address": address})
+
+@mcp.tool()
+def delete_label(address: str, name: str = "") -> str:
+    """
+    Remove a label from an address -- the counterpart to create_label.
+
+    Also the way to finish what delete_function starts: a function that was
+    renamed leaves its name behind as a label when the function is deleted.
+
+    A symbol that names a live function is refused rather than removed, since
+    deleting it would silently rename the function to a default; use
+    delete_function for that.
+
+    Args:
+        address: where the label is
+        name: which label, when the address carries more than one.
+              Omit to remove every user-defined label there.
+
+    Returns:
+        What was removed, and what was kept and why.
+    """
+    params = {"address": address}
+    if name:
+        params["name"] = name
+    return safe_post("delete_label", params)
+
+@mcp.tool()
+def analyze_program(address: str = "", length: int = 0) -> str:
+    """
+    Run Ghidra's auto-analysis.
+
+    Newly disassembled code is queued for analysis but nothing runs that queue
+    on its own here. Call this after disassemble() or create_function() to let
+    Ghidra find the functions, references and stack frames that follow from
+    the new code.
+
+    Returns as soon as analysis is scheduled -- it runs in the background, so
+    give it a moment before reading the results.
+
+    Args:
+        address: re-analyse from here. Omit to run the pending queue, which is
+                 the cheap and usual case.
+        length: bytes to cover when an address is given
+
+    Returns:
+        What was scheduled.
+    """
+    params = {}
+    if address:
+        params["address"] = address
+    if length:
+        params["length"] = str(length)
+    return safe_post("analyze", params)
+
+@mcp.tool()
+def undo(count: int = 1, dry_run: bool = False) -> str:
+    """
+    Take back the last change to the program.
+
+    The undo stack is SHARED -- with other sessions holding this program, and
+    with whoever is sitting in front of Ghidra. Undoing blind takes back
+    whatever happened to be last, which may not be yours and will not look any
+    different afterwards.
+
+    Transaction names carry the session tag that made them ("Create Function
+    [a1b2c3]"), so call with dry_run=True first to see whose work is on top.
+
+    Args:
+        count: how many entries to take back (default 1)
+        dry_run: report what would be undone and change nothing
+
+    Returns:
+        The name of every entry undone, and how many remain.
+    """
+    params = {"count": str(count)}
+    if dry_run:
+        params["dry_run"] = "true"
+    return safe_post("undo", params)
+
+@mcp.tool()
+def redo(count: int = 1, dry_run: bool = False) -> str:
+    """
+    Re-apply a change that was undone.
+
+    The redo stack is emptied by the next write from anyone, so a redo that
+    was available a moment ago may not be now.
+
+    Args:
+        count: how many entries to re-apply (default 1)
+        dry_run: report what would be redone and change nothing
+
+    Returns:
+        The name of every entry redone, and how many remain.
+    """
+    params = {"count": str(count)}
+    if dry_run:
+        params["dry_run"] = "true"
+    return safe_post("redo", params)
+
+@mcp.tool()
+def save_program() -> str:
+    """
+    Write the program back to its Ghidra project.
+
+    Everything done through this bridge -- renames, functions, comments,
+    types -- lives only in memory until this is called or somebody clicks Save
+    in the GUI.
+
+    Returns:
+        What was saved, or why it was not.
+    """
+    return safe_post("save_program", {})
+
+@mcp.tool()
+def get_program_info() -> list:
+    """
+    Describe the loaded program: processor, endianness, sizes, image base.
+
+    Worth calling once at the start of a session. It tells you which
+    disassembly modes the language actually supports (thumb_capable,
+    mips16_capable), the pointer size to use when defining structs, and
+    whether there are unsaved changes.
+
+    Returns:
+        One "key: value" line per fact.
+    """
+    return safe_get("program_info")
+
+@mcp.tool()
+def create_label(address: str, name: str, primary: bool = True) -> str:
+    """
+    Put a label on an address -- Ghidra's L key.
+
+    rename_function and rename_data can only rename something that already
+    exists. This names an address that has nothing on it: a jump-table entry,
+    an untyped data address, a place inside a function worth marking.
+
+    Args:
+        address: where to put it
+        name: the label
+        primary: make it the address's primary symbol (default True)
+
+    Returns:
+        A status message.
+    """
+    params = {"address": address, "name": name}
+    if not primary:
+        params["primary"] = "false"
+    return safe_post("create_label", params)
+
+@mcp.tool()
+def create_data(address: str, type: str, force: bool = False) -> str:
+    """
+    Apply a data type at an address -- Ghidra's T key.
+
+    Defines data on undefined bytes. set_global_data_type retypes an address
+    that already holds data; this is what puts it there in the first place.
+
+    Args:
+        address: where to apply it
+        type: a data type name, e.g. "int", "char[16]", "MyStruct *"
+        force: clear whatever is already defined at the address
+
+    Returns:
+        A status message including how many bytes were consumed.
+    """
+    params = {"address": address, "type": type}
+    if force:
+        params["force"] = "true"
+    return safe_post("create_data", params)
+
+@mcp.tool()
+def set_comment(address: str, comment: str, type: str = "eol") -> str:
+    """
+    Set any of Ghidra's five comment types at an address.
+
+    set_decompiler_comment and set_disassembly_comment are fixed to PRE and
+    EOL. This reaches the others -- in particular "plate", the boxed header
+    above a function, which is where a description of the function belongs.
+
+    An empty comment clears the comment of that type.
+
+    Args:
+        address: where to write it
+        comment: the text, or "" to clear
+        type: "eol", "pre", "post", "plate", or "repeatable"
+
+    Returns:
+        A status message.
+    """
+    return safe_post("set_comment",
+                     {"address": address, "comment": comment, "type": type})
+
+@mcp.tool()
+def create_class(name: str, parent_namespace: str = None, members: list = None) -> str:
+    """
+    Create a C++ class as a structure, optionally with members.
+
+    Args:
+        name: the class name
+        parent_namespace: the namespace to create it in (optional)
+        members: member dicts with 'name', 'type', and optionally 'offset' and
+                 'comment'. Example: [{"name": "hp", "type": "float"}]
+
+    Returns:
+        A status message.
+    """
+    params = {"name": name}
+    if parent_namespace:
+        params["parent_namespace"] = parent_namespace
+    if members:
+        params["members"] = json.dumps(members)
+    return safe_post("create_class", params)
 
 @mcp.tool()
 def set_function_prototype(function_address: str, prototype: str) -> str:

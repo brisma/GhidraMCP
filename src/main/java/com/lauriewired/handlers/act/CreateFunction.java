@@ -1,24 +1,29 @@
 package com.lauriewired.handlers.act;
 
 import com.lauriewired.handlers.Handler;
+import com.lauriewired.util.Disassemblers;
 import com.sun.net.httpserver.HttpExchange;
 import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
-import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.SourceType;
 
 import javax.swing.*;
 import java.lang.reflect.InvocationTargetException;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.lauriewired.util.ParseUtils.parseAddress;
 import static com.lauriewired.util.ParseUtils.parsePostParams;
 import static com.lauriewired.util.ParseUtils.sendResponse;
+import static com.lauriewired.util.ParseUtils.splitAddresses;
 import static ghidra.program.util.GhidraProgramUtilities.getCurrentProgram;
 
 /**
@@ -55,12 +60,19 @@ public final class CreateFunction extends Handler {
 		Map<String, String> params = parsePostParams(exchange);
 		String address = params.get("address");
 		String name = params.get("name");
+		String modeStr = params.get("mode");
 
 		if (address == null || address.isEmpty()) {
 			sendResponse(exchange, "Error: address is required");
 			return;
 		}
-		sendResponse(exchange, createFunctions(address, name));
+		Disassemblers.Mode mode = Disassemblers.parseMode(modeStr);
+		if (mode == null) {
+			sendResponse(exchange, "Error: unknown mode '" + modeStr
+					+ "'. Known modes: " + Disassemblers.modeNames());
+			return;
+		}
+		sendResponse(exchange, createFunctions(address, name, mode));
 	}
 
 	/**
@@ -68,14 +80,22 @@ public final class CreateFunction extends Handler {
 	 *
 	 * @param addressList one address, or several separated by commas
 	 * @param name        optional name, applied only for a single address
+	 * @param mode        which instruction set to decode undefined bytes as
 	 * @return a per-address report
 	 */
-	private String createFunctions(String addressList, String name) {
+	private String createFunctions(String addressList, String name, Disassemblers.Mode mode) {
 		Program program = getCurrentProgram(tool);
 		if (program == null)
 			return "No program loaded";
 
-		String[] addresses = addressList.split(",");
+		String unsupported = Disassemblers.unsupported(program, mode);
+		if (unsupported != null)
+			return "Error: " + unsupported;
+
+		List<String> addresses = splitAddresses(addressList);
+		if (addresses.isEmpty())
+			return "Error: address is required";
+
 		final AtomicReference<String> result = new AtomicReference<>();
 
 		try {
@@ -86,17 +106,8 @@ public final class CreateFunction extends Handler {
 				int created = 0, existing = 0, failed = 0;
 
 				try {
-					for (String raw : addresses) {
-						String addrStr = raw.trim();
-						if (addrStr.isEmpty())
-							continue;
-
-						Address addr;
-						try {
-							addr = program.getAddressFactory().getAddress(addrStr);
-						} catch (Exception e) {
-							addr = null;
-						}
+					for (String addrStr : addresses) {
+						Address addr = parseAddress(program, addrStr);
 						if (addr == null) {
 							report.append(addrStr).append(": invalid address\n");
 							failed++;
@@ -137,26 +148,41 @@ public final class CreateFunction extends Handler {
 						// Undefined bytes cannot become a function until they are code.
 						Instruction instr = program.getListing().getInstructionAt(addr);
 						if (instr == null) {
+							// The restricted set is null on purpose: it is the set
+							// of addresses disassembly is ALLOWED to touch, and this
+							// call used to pass a one-byte set built from addr. The
+							// disassembler decoded the instruction at addr, stepped
+							// to the next address, found it outside the set and
+							// stopped. CreateFunctionCmd then computed the body by
+							// following flow over the instructions that existed --
+							// exactly one -- so every function created from
+							// undefined bytes was one instruction long and was
+							// reported as created. Null means follow the flow.
 							DisassembleCommand disassemble =
-									new DisassembleCommand(addr, new AddressSet(addr), true);
+									Disassemblers.command(addr, null, mode);
 							disassemble.applyTo(program);
 							instr = program.getListing().getInstructionAt(addr);
 							if (instr == null) {
-								report.append(addrStr).append(": disassembly failed\n");
+								String why = disassemble.getStatusMsg();
+								report.append(addrStr).append(": disassembly failed")
+										.append(why != null && !why.isEmpty() ? " -- " + why : "")
+										.append("\n");
 								failed++;
 								continue;
 							}
 						}
 
-						String funcName = (addresses.length == 1 && name != null && !name.isEmpty())
+						String funcName = (addresses.size() == 1 && name != null && !name.isEmpty())
 								? name : null;
 						CreateFunctionCmd cmd =
 								new CreateFunctionCmd(funcName, addr, null, SourceType.USER_DEFINED);
 
 						if (cmd.applyTo(program)) {
-							Function created2 = program.getFunctionManager().getFunctionAt(addr);
+							Function madeFunc = program.getFunctionManager().getFunctionAt(addr);
 							report.append(addrStr).append(": created as ")
-									.append(created2 != null ? created2.getName() : "?").append("\n");
+									.append(madeFunc != null ? madeFunc.getName() : "?")
+									.append(describeBody(program, madeFunc))
+									.append("\n");
 							created++;
 						} else {
 							report.append(addrStr).append(": ").append(cmd.getStatusMsg()).append("\n");
@@ -179,5 +205,42 @@ public final class CreateFunction extends Handler {
 			return "Error: Failed to execute create function on Swing thread: " + e.getMessage();
 		}
 		return result.get();
+	}
+
+	/**
+	 * How big the function that was just created actually is.
+	 *
+	 * A one-instruction function is what a create over undefined bytes used to
+	 * produce every single time, and the reply said only "created" -- the
+	 * damage showed up later, as a decompilation that made no sense. Saying
+	 * the size in the reply is what makes that visible at the moment it
+	 * happens, and a body of one instruction is called out rather than left
+	 * for the caller to notice in a number.
+	 *
+	 * @param program the program
+	 * @param func    the function just created, or null
+	 * @return a parenthesised summary, or the empty string if there is nothing
+	 *         to say
+	 */
+	private static String describeBody(Program program, Function func) {
+		if (func == null) {
+			return "";
+		}
+		AddressSetView body = func.getBody();
+		long bytes = body.getNumAddresses();
+		int instructions = 0;
+		InstructionIterator it = program.getListing().getInstructions(body, true);
+		while (it.hasNext()) {
+			it.next();
+			instructions++;
+		}
+		StringBuilder sb = new StringBuilder();
+		sb.append(" (").append(bytes).append(" bytes, ")
+				.append(instructions).append(instructions == 1 ? " instruction" : " instructions");
+		if (instructions == 1) {
+			sb.append(" -- suspiciously small; the flow may be unreachable, "
+					+ "or the bytes may need a different mode");
+		}
+		return sb.append(")").toString();
 	}
 }

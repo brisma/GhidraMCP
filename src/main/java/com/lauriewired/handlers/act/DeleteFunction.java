@@ -6,9 +6,12 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.symbol.Symbol;
 
 import javax.swing.*;
 import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -123,7 +126,8 @@ public final class DeleteFunction extends Handler {
 
 						String name = func.getName();
 						if (program.getFunctionManager().removeFunction(addr)) {
-							report.append(addrStr).append(": deleted ").append(name).append("\n");
+							report.append(addrStr).append(": deleted ").append(name)
+									.append(leftoverLabels(program, addr)).append("\n");
 							deleted++;
 						} else {
 							report.append(addrStr).append(": Ghidra refused to remove ")
@@ -147,5 +151,36 @@ public final class DeleteFunction extends Handler {
 			return "Error: Failed to execute delete function on Swing thread: " + e.getMessage();
 		}
 		return result.get();
+	}
+
+	/**
+	 * Names any label still sitting on the entry point after the function
+	 * went away.
+	 *
+	 * Removing a function removes the FUNCTION, not the symbol. A function
+	 * that was renamed carries a real USER_DEFINED symbol at its entry, and
+	 * that symbol survives -- so an address whose bytes have gone back to
+	 * undefined still answers to the name, and a delete that was meant to
+	 * undo a misaimed create leaves a trace of it behind. Ghidra's own Delete
+	 * Function behaves the same way, so the fix is not to differ from it
+	 * silently but to say so, and to offer delete_label.
+	 *
+	 * @param program the program
+	 * @param addr    the former entry point
+	 * @return a note naming what is left, or the empty string if nothing is
+	 */
+	private static String leftoverLabels(Program program, Address addr) {
+		List<String> names = new ArrayList<>();
+		for (Symbol symbol : program.getSymbolTable().getSymbols(addr)) {
+			if (!symbol.isDynamic()) {
+				names.add(symbol.getName());
+			}
+		}
+		if (names.isEmpty()) {
+			return "";
+		}
+		return " (the label " + String.join(", ", names)
+				+ " is still on this address; remove it with delete_label if it "
+				+ "should go too)";
 	}
 }
