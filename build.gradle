@@ -60,3 +60,103 @@ buildExtension {
 	exclude 'tests/**'
 	exclude '.pytest_cache/**'
 }
+
+// ---------------------------------------------------------------------------
+// gradle installExtension
+//
+// Ghidra's Install Extensions dialog will not install over an existing
+// extension. The install directory is named after the extension -- always
+// "GhidraMCP", never the version -- and ExtensionUtils.hasExistingExtension
+// refuses outright with "Attempting to install a new extension over an
+// existing directory. Either remove the extension for that directory from the
+// UI or close Ghidra and delete the directory and try installing again."
+//
+// No version scheme avoids this. Naming the directory per version would
+// install builds SIDE BY SIDE, and two copies of this plugin both start HTTP
+// servers and both grab ports -- strictly worse than a stale one.
+//
+// So skip the dialog. Ghidra reads whatever is in the directory at startup,
+// so replacing it is a delete and a copy. Close Ghidra, run this, start it.
+// ---------------------------------------------------------------------------
+
+def ghidraUserExtensionsDir = { ->
+	def version = 'unknown'
+	def appProps = new File(ghidraInstallDir, 'Ghidra/application.properties')
+	if (appProps.exists()) {
+		def props = new Properties()
+		appProps.withInputStream { props.load(it) }
+		version = props.getProperty('application.version', 'unknown')
+		def release = props.getProperty('application.release.name', '')
+		if (release) {
+			version = "${version}_${release}"
+		}
+	}
+	// Windows puts user settings under APPDATA; everywhere else it is ~/.ghidra
+	// with a leading dot on the version directory.
+	if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+		def appData = System.getenv('APPDATA')
+		return new File("${appData}/ghidra/ghidra_${version}/Extensions")
+	}
+	return new File("${System.getProperty('user.home')}/.ghidra/.ghidra_${version}/Extensions")
+}
+
+tasks.register('installExtension') {
+	group = 'Ghidra'
+	description = 'Replaces the installed GhidraMCP extension with this build. Ghidra must be closed.'
+	dependsOn 'buildExtension'
+	doLast {
+		def extensionsDir = ghidraUserExtensionsDir()
+		def target = new File(extensionsDir, project.name)
+
+		if (!extensionsDir.exists() && !extensionsDir.mkdirs()) {
+			throw new GradleException("Could not create ${extensionsDir}")
+		}
+
+		// Check BEFORE deleting anything. File.deleteDir() removes what it can
+		// and only then reports failure, so a running Ghidra would be left with
+		// a half-deleted extension directory -- a worse state than the stale
+		// build this task exists to replace.
+		def live = []
+		(8080..8099).each { port ->
+			try {
+				def conn = new URL("http://127.0.0.1:${port}/health").openConnection()
+				conn.connectTimeout = 200
+				conn.readTimeout = 200
+				if (conn.inputStream.getText('UTF-8').trim() == 'ok') {
+					live << port
+				}
+			} catch (Exception ignored) {
+				// nothing listening there, which is what we want
+			}
+		}
+		if (!live.isEmpty()) {
+			throw new GradleException(
+				"A GhidraMCP instance is answering on port(s) ${live.join(', ')}.\n" +
+				"Ghidra is running and holds the jar open; deleting the extension\n" +
+				"now would leave it half removed. Close Ghidra and run this again.")
+		}
+
+		if (target.exists()) {
+			logger.lifecycle("Removing the installed build at ${target}")
+			if (!target.deleteDir()) {
+				throw new GradleException(
+					"Could not delete ${target}.\n" +
+					"Something still holds files in it open. Close Ghidra completely,\n" +
+					"check no other Ghidra is running, and try again.")
+			}
+		}
+
+		def zip = fileTree(dir: 'dist', include: '*.zip')
+			.files.toSorted { a, b -> b.lastModified() <=> a.lastModified() }.find()
+		if (zip == null) {
+			throw new GradleException("No extension zip in dist/")
+		}
+
+		logger.lifecycle("Installing ${zip.name} into ${extensionsDir}")
+		copy {
+			from zipTree(zip)
+			into extensionsDir
+		}
+		logger.lifecycle("Installed. Start Ghidra; the new build loads at startup.")
+	}
+}

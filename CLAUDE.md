@@ -26,6 +26,37 @@ gradle                    # Build the extension zip
 
 The build uses Ghidra's `buildExtension.gradle` script. Output goes to `dist/`.
 
+### Installing an update
+```bash
+gradle installExtension      # Ghidra must be CLOSED
+```
+
+Ghidra's Install Extensions dialog **cannot update an extension in place**. The
+install directory is named after the extension — always `GhidraMCP`, never the
+version — and `ExtensionUtils.hasExistingExtension` refuses outright:
+
+> Attempting to install a new extension over an existing directory. Either
+> remove the extension for that directory from the UI or close Ghidra and
+> delete the directory and try installing again.
+
+**No version scheme fixes this**, and it is worth understanding why before
+trying. `extension.properties` has a `version` field, but Ghidra's own
+`buildExtension.gradle` overwrites it with `@extversion@` → the *Ghidra*
+version (12.0.4), because that is what it means there — a compatibility
+marker, not your build number. Naming the directory per version would install
+builds **side by side**, and two copies of this plugin both start HTTP servers
+and both claim ports. That is strictly worse than a stale one.
+
+So `installExtension` skips the dialog: Ghidra loads whatever is in the
+directory at startup, so replacing it is a delete and a copy. It refuses if any
+instance is answering on 8080-8099, because `deleteDir` removes what it can
+before reporting failure and would otherwise leave a live install half deleted.
+
+Extensions live in `%APPDATA%\ghidra\ghidra_<version>\Extensions` on Windows
+and `~/.ghidra/.ghidra_<version>/Extensions` elsewhere. Note that installs are
+**per Ghidra version** — an old build under `ghidra_12.0.3_PUBLIC` keeps
+running for anyone still launching 12.0.3.
+
 ### Python Bridge
 ```bash
 pip install -r requirements.txt    # mcp>=1.2.0, requests>=2
