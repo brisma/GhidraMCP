@@ -2,8 +2,8 @@ package com.lauriewired.handlers.act;
 
 import com.lauriewired.handlers.Handler;
 import com.sun.net.httpserver.HttpExchange;
+import com.lauriewired.util.Decompilers;
 import ghidra.app.decompiler.DecompInterface;
-import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.listing.Function;
@@ -56,21 +56,29 @@ public final class DecompileFunctionByName extends Handler {
 		Program program = getCurrentProgram(tool);
 		if (program == null)
 			return "No program loaded";
-		DecompInterface decomp = new DecompInterface();
-		DecompileOptions options = new DecompileOptions();
-		options.setRespectReadOnly(true);
-		decomp.setOptions(options);
-		decomp.openProgram(program);
+
+		// Find the function BEFORE opening a decompiler. This used to open one
+		// first, so every lookup that found nothing still started -- and left
+		// running -- a native decompiler process.
+		Function target = null;
 		for (Function func : program.getFunctionManager().getFunctions(true)) {
 			if (func.getName().equals(name)) {
-				DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-				if (result != null && result.decompileCompleted()) {
-					return result.getDecompiledFunction().getC();
-				} else {
-					return "Decompilation failed";
-				}
+				target = func;
+				break;
 			}
 		}
-		return "Function not found";
+		if (target == null)
+			return "Function not found";
+
+		DecompInterface decomp = Decompilers.open(program);
+		try {
+			DecompileResults result = decomp.decompileFunction(
+					target, Decompilers.timeoutSeconds(tool), new ConsoleTaskMonitor());
+			return (result != null && result.decompileCompleted())
+					? result.getDecompiledFunction().getC()
+					: "Decompilation failed";
+		} finally {
+			decomp.dispose();
+		}
 	}
 }

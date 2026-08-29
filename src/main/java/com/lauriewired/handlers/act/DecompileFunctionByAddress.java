@@ -2,6 +2,7 @@ package com.lauriewired.handlers.act;
 
 import com.lauriewired.handlers.Handler;
 import com.sun.net.httpserver.HttpExchange;
+import com.lauriewired.util.Decompilers;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.framework.plugintool.PluginTool;
@@ -65,13 +66,20 @@ public final class DecompileFunctionByAddress extends Handler {
 			if (func == null)
 				return "No function found at or containing address " + addressStr;
 
-			DecompInterface decomp = new DecompInterface();
-			decomp.openProgram(program);
-			DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+			DecompInterface decomp = Decompilers.open(program);
+			try {
+				DecompileResults result = decomp.decompileFunction(
+						func, Decompilers.timeoutSeconds(tool), new ConsoleTaskMonitor());
 
-			return (result != null && result.decompileCompleted())
-					? result.getDecompiledFunction().getC()
-					: "Decompilation failed";
+				return (result != null && result.decompileCompleted())
+						? result.getDecompiledFunction().getC()
+						: "Decompilation failed";
+			} finally {
+				// openProgram starts a native decompiler process. Nothing in
+				// this project ever stopped one, so a long session left as many
+				// orphaned decompilers behind as it had made calls.
+				decomp.dispose();
+			}
 		} catch (Exception e) {
 			return "Error decompiling function: " + e.getMessage();
 		}

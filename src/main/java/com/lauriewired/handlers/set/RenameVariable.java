@@ -2,6 +2,7 @@ package com.lauriewired.handlers.set;
 
 import com.lauriewired.handlers.Handler;
 import com.sun.net.httpserver.HttpExchange;
+import com.lauriewired.util.Decompilers;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.framework.plugintool.PluginTool;
@@ -72,9 +73,10 @@ public final class RenameVariable extends Handler {
 		if (program == null)
 			return "No program loaded";
 
-		DecompInterface decomp = new DecompInterface();
-		decomp.openProgram(program);
-
+		// The function is found BEFORE a decompiler is opened, and the
+		// decompiler is disposed on every path out. This used to open one at
+		// the top and return from six places below without closing it, so a
+		// misspelled function name cost a native decompiler process.
 		Function func = null;
 		for (Function f : program.getFunctionManager().getFunctions(true)) {
 			if (f.getName().equals(functionName)) {
@@ -87,7 +89,29 @@ public final class RenameVariable extends Handler {
 			return "Function not found";
 		}
 
-		DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+		DecompInterface decomp = Decompilers.open(program);
+		try {
+			return renameWithin(program, decomp, func, oldVarName, newVarName);
+		} finally {
+			decomp.dispose();
+		}
+	}
+
+	/**
+	 * Renames the variable, with a decompiler already open and owned by the
+	 * caller.
+	 *
+	 * @param program    the program
+	 * @param decomp     an open decompiler, disposed by the caller
+	 * @param func       the function holding the variable
+	 * @param oldVarName the current name
+	 * @param newVarName the new name
+	 * @return a message indicating success or failure
+	 */
+	private String renameWithin(Program program, DecompInterface decomp, Function func,
+			String oldVarName, String newVarName) {
+		DecompileResults result = decomp.decompileFunction(
+				func, Decompilers.timeoutSeconds(tool), new ConsoleTaskMonitor());
 		if (result == null || !result.decompileCompleted()) {
 			return "Decompilation failed";
 		}
@@ -143,7 +167,11 @@ public final class RenameVariable extends Handler {
 				} catch (Exception e) {
 					Msg.error(this, "Failed to rename variable", e);
 				} finally {
-					program.endTransaction(tx, true);
+					// successFlag, not true: committing regardless recorded an
+					// undo entry for work that had thrown, and kept whatever
+					// commitParamsToDatabase had already written when
+					// updateDBVariable was the call that failed.
+					program.endTransaction(tx, successFlag.get());
 				}
 			});
 		} catch (InterruptedException | InvocationTargetException e) {

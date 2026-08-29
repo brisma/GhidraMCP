@@ -2,6 +2,7 @@ package com.lauriewired.handlers.set;
 
 import com.lauriewired.handlers.Handler;
 import com.sun.net.httpserver.HttpExchange;
+import com.lauriewired.util.Decompilers;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.framework.plugintool.PluginTool;
@@ -23,6 +24,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.lauriewired.util.GhidraUtils.resolveDataType;
 import static com.lauriewired.util.ParseUtils.*;
@@ -83,10 +85,20 @@ public final class SetLocalVariableType extends Handler {
 		}
 
 		// Try to set the type
-		boolean success = setLocalVariableType(functionAddress, variableName, newType);
+		AtomicReference<String> reason = new AtomicReference<>();
+		boolean success = setLocalVariableType(functionAddress, variableName, newType, reason);
 
-		String successMsg = success ? "Variable type set successfully" : "Failed to set variable type";
-		responseMsg.append("\nResult: ").append(successMsg);
+		responseMsg.append("\nResult: ");
+		if (success) {
+			responseMsg.append("Variable type set successfully");
+		} else {
+			// Why it failed used to go only to the Ghidra log, so the caller
+			// read "Failed to set variable type" and nothing more -- and an
+			// unknown type name did not even fail, it quietly became int.
+			String why = reason.get();
+			responseMsg.append("Failed to set variable type")
+					.append(why != null ? ": " + why : "");
+		}
 
 		sendResponse(exchange, responseMsg.toString());
 	}
@@ -99,24 +111,29 @@ public final class SetLocalVariableType extends Handler {
 	 * @param newType         The new type to set for the variable.
 	 * @return true if the type was set successfully, false otherwise.
 	 */
-	private boolean setLocalVariableType(String functionAddrStr, String variableName, String newType) {
+	private boolean setLocalVariableType(String functionAddrStr, String variableName,
+			String newType, AtomicReference<String> reason) {
 		// Input validation
 		Program program = getCurrentProgram(tool);
-		if (program == null)
+		if (program == null) {
+			reason.set("no program loaded");
 			return false;
+		}
 		if (functionAddrStr == null || functionAddrStr.isEmpty() ||
 				variableName == null || variableName.isEmpty() ||
 				newType == null || newType.isEmpty()) {
+			reason.set("function_address, variable_name and new_type are all required");
 			return false;
 		}
 
 		AtomicBoolean success = new AtomicBoolean(false);
 
 		try {
-			SwingUtilities
-					.invokeAndWait(() -> applyVariableType(program, functionAddrStr, variableName, newType, success));
+			SwingUtilities.invokeAndWait(() -> applyVariableType(
+					program, functionAddrStr, variableName, newType, success, reason));
 		} catch (InterruptedException | InvocationTargetException e) {
 			Msg.error(this, "Failed to execute set variable type on Swing thread", e);
+			reason.set("failed on the Swing thread: " + e.getMessage());
 		}
 
 		return success.get();
@@ -134,24 +151,28 @@ public final class SetLocalVariableType extends Handler {
 	 *                        successful.
 	 */
 	private void applyVariableType(Program program, String functionAddrStr,
-			String variableName, String newType, AtomicBoolean success) {
+			String variableName, String newType, AtomicBoolean success,
+			AtomicReference<String> reason) {
 		try {
 			// Find the function
 			Address addr = program.getAddressFactory().getAddress(functionAddrStr);
 			Function func = program.getListing().getFunctionContaining(addr);
 
 			if (func == null) {
+				reason.set("no function at or containing " + functionAddrStr);
 				Msg.error(this, "Could not find function at address: " + functionAddrStr);
 				return;
 			}
 
 			DecompileResults results = decompileFunction(func, program);
 			if (results == null || !results.decompileCompleted()) {
+				reason.set("could not decompile " + func.getName());
 				return;
 			}
 
 			ghidra.program.model.pcode.HighFunction highFunction = results.getHighFunction();
 			if (highFunction == null) {
+				reason.set("no high function for " + func.getName());
 				Msg.error(this, "No high function available");
 				return;
 			}
@@ -159,6 +180,7 @@ public final class SetLocalVariableType extends Handler {
 			// Find the symbol by name
 			HighSymbol symbol = findSymbolByName(highFunction, variableName);
 			if (symbol == null) {
+				reason.set("no variable named '" + variableName + "' in the decompilation of " + func.getName());
 				Msg.error(this, "Could not find variable '" + variableName + "' in decompiled function");
 				return;
 			}
@@ -166,6 +188,7 @@ public final class SetLocalVariableType extends Handler {
 			// Get high variable
 			HighVariable highVar = symbol.getHighVariable();
 			if (highVar == null) {
+				reason.set("no high variable named '" + variableName + "' in this function");
 				Msg.error(this, "No HighVariable found for symbol: " + variableName);
 				return;
 			}
@@ -178,6 +201,7 @@ public final class SetLocalVariableType extends Handler {
 			DataType dataType = resolveDataType(tool, dtm, newType);
 
 			if (dataType == null) {
+				reason.set("unknown data type '" + newType + "'");
 				Msg.error(this, "Could not resolve data type: " + newType);
 				return;
 			}
@@ -188,6 +212,7 @@ public final class SetLocalVariableType extends Handler {
 			updateVariableType(program, symbol, dataType, success);
 
 		} catch (Exception e) {
+			reason.set(e.getMessage());
 			Msg.error(this, "Error setting variable type: " + e.getMessage());
 		}
 	}
@@ -263,19 +288,26 @@ public final class SetLocalVariableType extends Handler {
 	 */
 	private DecompileResults decompileFunction(Function func, Program program) {
 		// Set up decompiler for accessing the decompiled function
-		DecompInterface decomp = new DecompInterface();
-		decomp.openProgram(program);
-		decomp.setSimplificationStyle("decompile"); // Full decompilation
+		DecompInterface decomp = Decompilers.open(program);
+		try {
+			decomp.setSimplificationStyle("decompile"); // Full decompilation
 
-		// Decompile the function
-		DecompileResults results = decomp.decompileFunction(func, 60, new ConsoleTaskMonitor());
+			// Decompile the function
+			DecompileResults results = decomp.decompileFunction(
+					func, Decompilers.timeoutSeconds(tool), new ConsoleTaskMonitor());
 
-		if (!results.decompileCompleted()) {
-			Msg.error(this, "Could not decompile function: " + results.getErrorMessage());
-			return null;
+			if (results == null || !results.decompileCompleted()) {
+				Msg.error(this, "Could not decompile function: "
+						+ (results == null ? "no result" : results.getErrorMessage()));
+				return null;
+			}
+
+			return results;
+		} finally {
+			// The results hold their own parsed HighFunction, so they stay
+			// usable once the decompiler process behind them is gone.
+			decomp.dispose();
 		}
-
-		return results;
 	}
 
 	/**

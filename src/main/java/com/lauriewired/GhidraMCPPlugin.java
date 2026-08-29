@@ -249,6 +249,13 @@ public class GhidraMCPPlugin extends Plugin {
 		Reflections reflections = new Reflections("com.lauriewired.handlers");
 		Set<Class<? extends Handler>> subclasses = reflections.getSubTypesOf(Handler.class);
 		for (Class<?> clazz : subclasses) {
+			// An abstract Handler is a shared base, not an endpoint. Without
+			// this it is reflected like any other, fails to produce a public
+			// (PluginTool) constructor and is logged as an error at every
+			// startup -- which trains you to ignore that error.
+			if (java.lang.reflect.Modifier.isAbstract(clazz.getModifiers())) {
+				continue;
+			}
 			try {
 				Constructor<?> constructor = clazz.getConstructor(PluginTool.class);
 				Handler handler = (Handler) constructor.newInstance(tool);

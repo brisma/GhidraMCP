@@ -56,8 +56,15 @@ public final class GetBytes extends Handler {
 		if (size <= 0)
 			return "Size must be > 0";
 
+		// getAddress returns null for text it cannot parse rather than
+		// throwing, so without this the null reaches getBytes and the caller
+		// is told "Cannot invoke Address.addNoWrap(long) because addr is null"
+		// instead of which address was wrong.
+		Address addr = parseAddress(program, addressStr);
+		if (addr == null)
+			return "Error: invalid address " + addressStr;
+
 		try {
-			Address addr = program.getAddressFactory().getAddress(addressStr);
 			byte[] buf = new byte[size];
 			int read = program.getMemory().getBytes(addr, buf);
 			return hexdump(addr, buf, read);

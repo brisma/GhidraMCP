@@ -42,7 +42,12 @@ public final class GhidraUtils {
 	 * @param tool     The plugin tool to use for services
 	 * @param dtm      The data type manager
 	 * @param typeName The type name to resolve
-	 * @return The resolved DataType, or null if not found
+	 * @return The resolved DataType, or null if no manager knows the name.
+	 *         Callers must report null rather than substituting something:
+	 *         this used to fall back to int, so a mistyped struct name became
+	 *         a four-byte integer with only a log line to say so, and the
+	 *         wrong type then propagated through every decompilation that
+	 *         used it.
 	 */
 	public static DataType resolveDataType(PluginTool tool, DataTypeManager dtm, String typeName) {
 		DataTypeManagerService dtms = tool.getService(DataTypeManagerService.class);
@@ -70,9 +75,8 @@ public final class GhidraUtils {
 			}
 		}
 
-		// Fallback to int if we couldn't find it
-		Msg.warn(GhidraUtils.class, "Unknown type: " + typeName + ", defaulting to int");
-		return dtm.getDataType("/int");
+		Msg.warn(GhidraUtils.class, "Unknown type: " + typeName);
+		return null;
 	}
 
 	/**

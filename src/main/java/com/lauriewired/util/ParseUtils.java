@@ -2,12 +2,14 @@ package com.lauriewired.util;
 
 import com.sun.net.httpserver.HttpExchange;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,25 +32,16 @@ public final class ParseUtils {
 	 *         the map will contain {"offset": "10", "limit": "100"}
 	 */
 	public static Map<String, String> parseQueryParams(HttpExchange exchange) {
-		Map<String, String> result = new HashMap<>();
-		String query = exchange.getRequestURI().getQuery(); // e.g. offset=10&limit=100
-		if (query != null) {
-			String[] pairs = query.split("&");
-			for (String p : pairs) {
-				String[] kv = p.split("=");
-				if (kv.length == 2) {
-					// URL decode parameter values
-					try {
-						String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
-						String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
-						result.put(key, value);
-					} catch (Exception e) {
-						Msg.error(ParseUtils.class, "Error decoding URL parameter", e);
-					}
-				}
-			}
-		}
-		return result;
+		// getRawQuery, not getQuery. URI.getQuery() hands back the query with
+		// its percent-escapes ALREADY resolved, so splitting it on & and = cuts
+		// on separators the caller had carefully escaped, and decoding the
+		// pieces afterwards decodes them a second time. Both were observable:
+		//
+		//   GET /get_bytes?address=0x710163208c%26size=4
+		//
+		// was read as two parameters, and a filter of %2520 arrived as a space.
+		// A value could therefore inject a parameter the caller never sent.
+		return parseUrlEncoded(exchange.getRequestURI().getRawQuery());
 	}
 
 	/**
@@ -62,22 +55,43 @@ public final class ParseUtils {
 	 */
 	public static Map<String, String> parsePostParams(HttpExchange exchange) throws IOException {
 		byte[] body = exchange.getRequestBody().readAllBytes();
-		String bodyStr = new String(body, StandardCharsets.UTF_8);
-		Map<String, String> params = new HashMap<>();
-		for (String pair : bodyStr.split("&")) {
-			String[] kv = pair.split("=");
-			if (kv.length == 2) {
-				// URL decode parameter values
-				try {
-					String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
-					String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
-					params.put(key, value);
-				} catch (Exception e) {
-					Msg.error(ParseUtils.class, "Error decoding URL parameter", e);
+		return parseUrlEncoded(new String(body, StandardCharsets.UTF_8));
+	}
+
+	/**
+	 * Split an application/x-www-form-urlencoded string into parameters.
+	 *
+	 * Splits on the raw separators FIRST and decodes each half exactly once,
+	 * which is the only order that lets a value contain an escaped '&' or '='.
+	 * A pair with no '=' at all yields an empty value rather than being
+	 * dropped, so `name=` reaches the handler as "" -- handlers test for
+	 * emptiness, and silently losing the key hid which of the two it was.
+	 *
+	 * @param raw the encoded string, or null
+	 * @return the decoded parameters
+	 */
+	public static Map<String, String> parseUrlEncoded(String raw) {
+		Map<String, String> result = new HashMap<>();
+		if (raw == null || raw.isEmpty()) {
+			return result;
+		}
+		for (String pair : raw.split("&")) {
+			if (pair.isEmpty()) {
+				continue;
+			}
+			int eq = pair.indexOf('=');
+			String rawKey = (eq < 0) ? pair : pair.substring(0, eq);
+			String rawValue = (eq < 0) ? "" : pair.substring(eq + 1);
+			try {
+				String key = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+				if (!key.isEmpty()) {
+					result.put(key, URLDecoder.decode(rawValue, StandardCharsets.UTF_8));
 				}
+			} catch (Exception e) {
+				Msg.error(ParseUtils.class, "Error decoding URL parameter", e);
 			}
 		}
-		return params;
+		return result;
 	}
 
 	/**
@@ -118,8 +132,69 @@ public final class ParseUtils {
 	}
 
 	/**
+	 * Parse a long from a string, returning a default value if parsing fails.
+	 *
+	 * @param val          The string to parse.
+	 * @param defaultValue The default value to return if parsing fails.
+	 * @return The parsed long or the default value if parsing fails.
+	 */
+	public static long parseLongOrDefault(String val, long defaultValue) {
+		if (val == null)
+			return defaultValue;
+		try {
+			return Long.parseLong(val.trim());
+		} catch (NumberFormatException e) {
+			return defaultValue;
+		}
+	}
+
+	/**
+	 * Resolve an address in a program, or null if the text does not name one.
+	 *
+	 * Ghidra's address factory throws for some malformed input and returns
+	 * null for the rest; callers only ever want to know which addresses they
+	 * can act on, so both become null here.
+	 *
+	 * @param program    the program whose address space to resolve against
+	 * @param addressStr the address text
+	 * @return the address, or null
+	 */
+	public static Address parseAddress(Program program, String addressStr) {
+		if (program == null || addressStr == null || addressStr.trim().isEmpty()) {
+			return null;
+		}
+		try {
+			return program.getAddressFactory().getAddress(addressStr.trim());
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	/**
+	 * Split a comma-separated address parameter into its parts.
+	 *
+	 * Blank entries are dropped, so a trailing comma is not an error.
+	 *
+	 * @param addressList one address, or several separated by commas
+	 * @return the non-empty pieces, in the order given
+	 */
+	public static List<String> splitAddresses(String addressList) {
+		List<String> out = new ArrayList<>();
+		if (addressList == null) {
+			return out;
+		}
+		for (String raw : addressList.split(",")) {
+			String trimmed = raw.trim();
+			if (!trimmed.isEmpty()) {
+				out.add(trimmed);
+			}
+		}
+		return out;
+	}
+
+	/**
 	 * Escape non-ASCII characters in a string.
-	 * 
+	 *
 	 * @param input The input string to escape.
 	 * @return A string where non-ASCII characters are replaced with their
 	 *         hexadecimal representation, e.g. "\xFF" for 255.

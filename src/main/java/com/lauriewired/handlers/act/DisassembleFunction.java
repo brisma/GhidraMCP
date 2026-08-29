@@ -64,15 +64,15 @@ public final class DisassembleFunction extends Handler {
 
 			StringBuilder result = new StringBuilder();
 			Listing listing = program.getListing();
-			Address start = func.getEntryPoint();
-			Address end = func.getBody().getMaxAddress();
 
-			InstructionIterator instructions = listing.getInstructions(start, true);
+			// Iterate the BODY, not entry..maxAddress. A function body is a set
+			// of ranges, not one span: compilers put cold blocks elsewhere and
+			// split hot paths, so walking straight from the entry to the body's
+			// highest address also walks through whatever sits in the gaps --
+			// other functions' instructions, reported as part of this one.
+			InstructionIterator instructions = listing.getInstructions(func.getBody(), true);
 			while (instructions.hasNext()) {
 				Instruction instr = instructions.next();
-				if (instr.getAddress().compareTo(end) > 0) {
-					break; // Stop if we've gone past the end of the function
-				}
 				String comment = listing.getComment(CommentType.EOL, instr.getAddress());
 				comment = (comment != null) ? "; " + comment : "";
 
@@ -81,6 +81,10 @@ public final class DisassembleFunction extends Handler {
 						instr.toString(),
 						comment));
 			}
+
+			if (result.length() == 0)
+				return "No instructions in the body of " + func.getName()
+						+ " @ " + func.getEntryPoint();
 
 			return result.toString();
 		} catch (Exception e) {
