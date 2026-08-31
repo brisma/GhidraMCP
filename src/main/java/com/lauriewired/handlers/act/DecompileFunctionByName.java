@@ -13,6 +13,8 @@ import ghidra.util.task.ConsoleTaskMonitor;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
+import static com.lauriewired.util.Decompilers.failure;
+import static com.lauriewired.util.Decompilers.open;
 import static com.lauriewired.util.ParseUtils.sendResponse;
 import static ghidra.program.util.GhidraProgramUtilities.getCurrentProgram;
 
@@ -56,21 +58,30 @@ public final class DecompileFunctionByName extends Handler {
 		Program program = getCurrentProgram(tool);
 		if (program == null)
 			return "No program loaded";
-		DecompInterface decomp = new DecompInterface();
 		DecompileOptions options = new DecompileOptions();
 		options.setRespectReadOnly(true);
-		decomp.setOptions(options);
-		decomp.openProgram(program);
-		for (Function func : program.getFunctionManager().getFunctions(true)) {
-			if (func.getName().equals(name)) {
-				DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-				if (result != null && result.decompileCompleted()) {
-					return result.getDecompiledFunction().getC();
-				} else {
-					return "Decompilation failed";
+		DecompInterface decomp;
+		try {
+			decomp = open(program, options);
+		} catch (IOException e) {
+			return e.getMessage();
+		}
+		// Disposed in a finally: an interface that is dropped instead leaves its
+		// native `decompile` process running for the life of the JVM.
+		try {
+			for (Function func : program.getFunctionManager().getFunctions(true)) {
+				if (func.getName().equals(name)) {
+					DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+					if (result != null && result.decompileCompleted()) {
+						return result.getDecompiledFunction().getC();
+					} else {
+						return failure(result);
+					}
 				}
 			}
+			return "Function not found";
+		} finally {
+			decomp.dispose();
 		}
-		return "Function not found";
 	}
 }

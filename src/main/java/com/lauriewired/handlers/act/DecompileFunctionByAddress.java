@@ -13,6 +13,8 @@ import ghidra.util.task.ConsoleTaskMonitor;
 import java.io.IOException;
 import java.util.Map;
 
+import static com.lauriewired.util.Decompilers.failure;
+import static com.lauriewired.util.Decompilers.open;
 import static com.lauriewired.util.ParseUtils.parseQueryParams;
 import static com.lauriewired.util.ParseUtils.sendResponse;
 import static ghidra.program.util.GhidraProgramUtilities.getCurrentProgram;
@@ -65,13 +67,17 @@ public final class DecompileFunctionByAddress extends Handler {
 			if (func == null)
 				return "No function found at or containing address " + addressStr;
 
-			DecompInterface decomp = new DecompInterface();
-			decomp.openProgram(program);
-			DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
-
-			return (result != null && result.decompileCompleted())
-					? result.getDecompiledFunction().getC()
-					: "Decompilation failed";
+			// Disposed in a finally: an interface that is dropped instead leaves its
+			// native `decompile` process running for the life of the JVM.
+			DecompInterface decomp = open(program);
+			try {
+				DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
+				return (result != null && result.decompileCompleted())
+						? result.getDecompiledFunction().getC()
+						: failure(result);
+			} finally {
+				decomp.dispose();
+			}
 		} catch (Exception e) {
 			return "Error decompiling function: " + e.getMessage();
 		}

@@ -24,6 +24,8 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.lauriewired.util.Decompilers.failure;
+import static com.lauriewired.util.Decompilers.open;
 import static com.lauriewired.util.GhidraUtils.resolveDataType;
 import static com.lauriewired.util.ParseUtils.*;
 import static ghidra.program.util.GhidraProgramUtilities.getCurrentProgram;
@@ -145,47 +147,56 @@ public final class SetLocalVariableType extends Handler {
 				return;
 			}
 
-			DecompileResults results = decompileFunction(func, program);
-			if (results == null || !results.decompileCompleted()) {
-				return;
+			// Disposed in a finally: an interface that is dropped instead leaves its
+			// native `decompile` process running for the life of the JVM. It stays open
+			// across the database update, because the HighSymbol being committed came
+			// out of it.
+			DecompInterface decomp = open(program);
+			try {
+				DecompileResults results = decompileFunction(decomp, func);
+				if (results == null || !results.decompileCompleted()) {
+					return;
+				}
+
+				ghidra.program.model.pcode.HighFunction highFunction = results.getHighFunction();
+				if (highFunction == null) {
+					Msg.error(this, "No high function available");
+					return;
+				}
+
+				// Find the symbol by name
+				HighSymbol symbol = findSymbolByName(highFunction, variableName);
+				if (symbol == null) {
+					Msg.error(this, "Could not find variable '" + variableName + "' in decompiled function");
+					return;
+				}
+
+				// Get high variable
+				HighVariable highVar = symbol.getHighVariable();
+				if (highVar == null) {
+					Msg.error(this, "No HighVariable found for symbol: " + variableName);
+					return;
+				}
+
+				Msg.info(this, "Found high variable for: " + variableName +
+						" with current type " + highVar.getDataType().getName());
+
+				// Find the data type
+				DataTypeManager dtm = program.getDataTypeManager();
+				DataType dataType = resolveDataType(tool, dtm, newType);
+
+				if (dataType == null) {
+					Msg.error(this, "Could not resolve data type: " + newType);
+					return;
+				}
+
+				Msg.info(this, "Using data type: " + dataType.getName() + " for variable " + variableName);
+
+				// Apply the type change in a transaction
+				updateVariableType(program, symbol, dataType, success);
+			} finally {
+				decomp.dispose();
 			}
-
-			ghidra.program.model.pcode.HighFunction highFunction = results.getHighFunction();
-			if (highFunction == null) {
-				Msg.error(this, "No high function available");
-				return;
-			}
-
-			// Find the symbol by name
-			HighSymbol symbol = findSymbolByName(highFunction, variableName);
-			if (symbol == null) {
-				Msg.error(this, "Could not find variable '" + variableName + "' in decompiled function");
-				return;
-			}
-
-			// Get high variable
-			HighVariable highVar = symbol.getHighVariable();
-			if (highVar == null) {
-				Msg.error(this, "No HighVariable found for symbol: " + variableName);
-				return;
-			}
-
-			Msg.info(this, "Found high variable for: " + variableName +
-					" with current type " + highVar.getDataType().getName());
-
-			// Find the data type
-			DataTypeManager dtm = program.getDataTypeManager();
-			DataType dataType = resolveDataType(tool, dtm, newType);
-
-			if (dataType == null) {
-				Msg.error(this, "Could not resolve data type: " + newType);
-				return;
-			}
-
-			Msg.info(this, "Using data type: " + dataType.getName() + " for variable " + variableName);
-
-			// Apply the type change in a transaction
-			updateVariableType(program, symbol, dataType, success);
 
 		} catch (Exception e) {
 			Msg.error(this, "Error setting variable type: " + e.getMessage());
@@ -256,22 +267,16 @@ public final class SetLocalVariableType extends Handler {
 
 	/**
 	 * Decompile the function to access its high-level representation.
-	 * 
-	 * @param func    The function to decompile.
-	 * @param program The current program.
+	 *
+	 * @param decomp An open decompiler, owned and released by the caller.
+	 * @param func   The function to decompile.
 	 * @return The DecompileResults containing the decompiled function.
 	 */
-	private DecompileResults decompileFunction(Function func, Program program) {
-		// Set up decompiler for accessing the decompiled function
-		DecompInterface decomp = new DecompInterface();
-		decomp.openProgram(program);
-		decomp.setSimplificationStyle("decompile"); // Full decompilation
-
-		// Decompile the function
+	private DecompileResults decompileFunction(DecompInterface decomp, Function func) {
 		DecompileResults results = decomp.decompileFunction(func, 60, new ConsoleTaskMonitor());
 
 		if (!results.decompileCompleted()) {
-			Msg.error(this, "Could not decompile function: " + results.getErrorMessage());
+			Msg.error(this, failure(results));
 			return null;
 		}
 

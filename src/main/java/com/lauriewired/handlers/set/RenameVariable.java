@@ -24,6 +24,8 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.lauriewired.util.Decompilers.failure;
+import static com.lauriewired.util.Decompilers.open;
 import static com.lauriewired.util.ParseUtils.parsePostParams;
 import static com.lauriewired.util.ParseUtils.sendResponse;
 import static ghidra.program.util.GhidraProgramUtilities.getCurrentProgram;
@@ -72,9 +74,35 @@ public final class RenameVariable extends Handler {
 		if (program == null)
 			return "No program loaded";
 
-		DecompInterface decomp = new DecompInterface();
-		decomp.openProgram(program);
+		DecompInterface decomp;
+		try {
+			decomp = open(program);
+		} catch (IOException e) {
+			return e.getMessage();
+		}
+		// Disposed in a finally: an interface that is dropped instead leaves its
+		// native `decompile` process running for the life of the JVM. It stays open
+		// across the database update, because the HighSymbol being committed came
+		// out of it.
+		try {
+			return renameWithDecompiler(decomp, program, functionName, oldVarName, newVarName);
+		} finally {
+			decomp.dispose();
+		}
+	}
 
+	/**
+	 * Renames the variable, with a decompiler its caller opened and will release.
+	 *
+	 * @param decomp       an open decompiler, owned by the caller
+	 * @param program      the current program
+	 * @param functionName the name of the function containing the variable
+	 * @param oldVarName   the current name of the variable to rename
+	 * @param newVarName   the new name for the variable
+	 * @return a message indicating success or failure
+	 */
+	private String renameWithDecompiler(DecompInterface decomp, Program program,
+			String functionName, String oldVarName, String newVarName) {
 		Function func = null;
 		for (Function f : program.getFunctionManager().getFunctions(true)) {
 			if (f.getName().equals(functionName)) {
@@ -89,7 +117,7 @@ public final class RenameVariable extends Handler {
 
 		DecompileResults result = decomp.decompileFunction(func, 30, new ConsoleTaskMonitor());
 		if (result == null || !result.decompileCompleted()) {
-			return "Decompilation failed";
+			return failure(result);
 		}
 
 		HighFunction highFunction = result.getHighFunction();
